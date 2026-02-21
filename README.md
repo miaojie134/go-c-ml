@@ -20,7 +20,13 @@ python -m pip install -r requirements.txt
 ## 2) 一条命令开始训练（推荐）
 
 ```bash
+# Linux / macOS
 ./run_ml.sh train ETHUSDT
+
+# Windows (CMD / PowerShell)
+run_ml.cmd train ETHUSDT
+# 或
+py run_ml.py train ETHUSDT
 ```
 
 输出到：
@@ -32,12 +38,21 @@ python -m pip install -r requirements.txt
 ## 3) 统一入口命令
 
 ```bash
+# Linux / macOS
 ./run_ml.sh train SYMBOL [extra args...]
 ./run_ml.sh auto SYMBOL [extra args...]
 ./run_ml.sh auto-ls SYMBOL [extra args...]
 ./run_ml.sh backtest SYMBOL [extra args...]
 ./run_ml.sh backtest-best SYMBOL [extra args...]
 ./run_ml.sh grid SYMBOL [extra args...]
+
+# Windows
+run_ml.cmd train SYMBOL [extra args...]
+run_ml.cmd auto SYMBOL [extra args...]
+run_ml.cmd auto-ls SYMBOL [extra args...]
+run_ml.cmd backtest SYMBOL [extra args...]
+run_ml.cmd backtest-best SYMBOL [extra args...]
+run_ml.cmd grid SYMBOL [extra args...]
 ```
 
 例子：
@@ -59,6 +74,8 @@ python -m pip install -r requirements.txt
 - 缺少虚拟环境时自动创建 `venv`
 - 缺少依赖时自动 `pip install -r requirements.txt`
 - 若交易对 K 线数据不存在，自动从 Binance 下载对应 `symbol/interval` 数据
+
+`run_ml.cmd` / `run_ml.py` 在 Windows 下也有同样行为。
 
 如果你传了自定义 `DATA_ROOT`，请确保它以 `/data` 结尾，便于自动下载器写入正确目录。
 
