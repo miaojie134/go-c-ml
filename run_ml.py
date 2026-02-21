@@ -3,19 +3,21 @@ from __future__ import annotations
 
 import glob
 import os
+import shutil
 import subprocess
 import sys
 import venv
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 
 ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
 
-BINANCE_DIR = Path(os.getenv("BINANCE_DIR", str(ROOT / "binance-public-data")))
-BINANCE_PY_DIR = Path(os.getenv("BINANCE_PY_DIR", str(BINANCE_DIR / "python")))
 PROJECT_VENV_DIR = ROOT / ".venv"
-LEGACY_BINANCE_VENV_DIR = BINANCE_PY_DIR / ".venv"
+BINANCE_DATA_BASE_URL = "https://data.binance.vision/data/futures"
 
 
 def _venv_python_path(venv_dir: Path) -> Path:
@@ -48,7 +50,6 @@ def _resolve_default_venv_python() -> Path:
     candidates.extend(
         [
             _venv_python_path(PROJECT_VENV_DIR),
-            _venv_python_path(LEGACY_BINANCE_VENV_DIR),
         ]
     )
     for candidate in candidates:
@@ -59,7 +60,7 @@ def _resolve_default_venv_python() -> Path:
 
 VENV_PY = _resolve_default_venv_python()
 VENV_DIR = VENV_PY.parent.parent if _looks_like_venv_python(VENV_PY) else PROJECT_VENV_DIR
-DATA_ROOT = Path(os.getenv("DATA_ROOT", str(BINANCE_PY_DIR / "data")))
+DATA_ROOT = Path(os.getenv("DATA_ROOT", str(ROOT / "data")))
 INTERVAL = os.getenv("INTERVAL", "15m")
 TRADING_TYPE = os.getenv("TRADING_TYPE", "um")
 TIME_PERIOD = os.getenv("TIME_PERIOD", "daily")
@@ -78,15 +79,6 @@ def python_major_minor(python_bin: Path) -> tuple[int, int]:
     ).strip()
     major, minor = out.split(".", 1)
     return int(major), int(minor)
-
-
-def ensure_binance_repo() -> None:
-    if BINANCE_PY_DIR.is_dir():
-        return
-    if not shutil_which("git"):
-        raise SystemExit("git not found, cannot auto-download binance-public-data")
-    print("[setup] cloning binance-public-data ...", flush=True)
-    run(["git", "clone", "--depth", "1", "https://github.com/binance/binance-public-data.git", str(BINANCE_DIR)])
 
 
 def ensure_python() -> None:
@@ -116,9 +108,6 @@ def ensure_deps() -> None:
     try:
         run([str(VENV_PY), "-m", "pip", "install", "-U", "pip"])
         run([str(VENV_PY), "-m", "pip", "install", "-r", "requirements.txt"])
-        req2 = BINANCE_PY_DIR / "requirements.txt"
-        if req2.is_file():
-            run([str(VENV_PY), "-m", "pip", "install", "-r", str(req2)])
     except subprocess.CalledProcessError as exc:
         if py_ver >= (3, 14):
             raise SystemExit(
@@ -129,7 +118,6 @@ def ensure_deps() -> None:
 
 
 def ensure_runtime() -> None:
-    ensure_binance_repo()
     ensure_python()
     ensure_deps()
 
@@ -228,6 +216,49 @@ def has_kline_data(symbol_upper: str, interval: str, trading_type: str, time_per
     return len(glob.glob(str(pattern))) > 0
 
 
+def _parse_iso_date(label: str, value: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise SystemExit(f"invalid {label}: {value}, expected YYYY-MM-DD") from exc
+
+
+def _iter_month_starts(start_day: date, end_day: date):
+    cur = date(start_day.year, start_day.month, 1)
+    end = date(end_day.year, end_day.month, 1)
+    while cur <= end:
+        yield cur
+        if cur.month == 12:
+            cur = date(cur.year + 1, 1, 1)
+        else:
+            cur = date(cur.year, cur.month + 1, 1)
+
+
+def _download_to_file(url: str, target_path: Path) -> str:
+    if target_path.is_file():
+        return "exists"
+
+    tmp_path = target_path.with_suffix(target_path.suffix + ".part")
+    req = urlrequest.Request(url, headers={"User-Agent": "go-c-ml/1.0"})
+    try:
+        with urlrequest.urlopen(req, timeout=60) as resp, tmp_path.open("wb") as f:
+            shutil.copyfileobj(resp, f)
+        tmp_path.replace(target_path)
+        return "downloaded"
+    except urlerror.HTTPError as exc:
+        if exc.code == 404:
+            if tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+            return "not_found"
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def ensure_kline_data(
     symbol: str,
     interval: str,
@@ -240,40 +271,55 @@ def ensure_kline_data(
     if has_kline_data(symbol_upper, interval, trading_type, time_period):
         return
 
-    dl_script = BINANCE_PY_DIR / "download-kline.py"
-    if not dl_script.is_file():
-        raise SystemExit(f"download script not found: {dl_script}")
+    start_day = _parse_iso_date("start-date", start_date)
+    end_day = _parse_iso_date("end-date", end_date) if end_date else datetime.now(timezone.utc).date()
+    if start_day > end_day:
+        raise SystemExit(f"start-date {start_date} is later than end-date {end_day.isoformat()}")
 
-    if DATA_ROOT.name != "data":
-        raise SystemExit(f"DATA_ROOT must end with '/data' for auto download, current: {DATA_ROOT}")
+    save_dir = DATA_ROOT / "futures" / trading_type / time_period / "klines" / symbol_upper / interval
+    save_dir.mkdir(parents=True, exist_ok=True)
 
-    store_dir = DATA_ROOT.parent
-    cmd = [
-        str(VENV_PY),
-        str(dl_script),
-        "-t",
-        trading_type,
-        "-s",
-        symbol_upper,
-        "-i",
-        interval,
-        "-startDate",
-        start_date,
-    ]
-    if end_date:
-        cmd.extend(["-endDate", end_date])
-    if time_period == "daily":
-        cmd.extend(["-skip-monthly", "1"])
-    elif time_period == "monthly":
-        cmd.extend(["-skip-daily", "1"])
-
-    env = dict(os.environ)
-    env["STORE_DIRECTORY"] = str(store_dir)
+    downloaded = 0
+    exists = 0
+    not_found = 0
     print(
-        f"[setup] data not found, downloading klines: symbol={symbol_upper} interval={interval} type={trading_type} period={time_period}",
+        f"[setup] data not found, downloading klines from Binance: symbol={symbol_upper} interval={interval} type={trading_type} period={time_period}",
         flush=True,
     )
-    run(cmd, env=env)
+
+    if time_period == "daily":
+        cur = start_day
+        while cur <= end_day:
+            day_str = cur.isoformat()
+            file_name = f"{symbol_upper}-{interval}-{day_str}.zip"
+            url = f"{BINANCE_DATA_BASE_URL}/{trading_type}/daily/klines/{symbol_upper}/{interval}/{file_name}"
+            status = _download_to_file(url, save_dir / file_name)
+            if status == "downloaded":
+                downloaded += 1
+            elif status == "exists":
+                exists += 1
+            else:
+                not_found += 1
+            cur += timedelta(days=1)
+    elif time_period == "monthly":
+        for month_start in _iter_month_starts(start_day, end_day):
+            month_str = f"{month_start.year:04d}-{month_start.month:02d}"
+            file_name = f"{symbol_upper}-{interval}-{month_str}.zip"
+            url = f"{BINANCE_DATA_BASE_URL}/{trading_type}/monthly/klines/{symbol_upper}/{interval}/{file_name}"
+            status = _download_to_file(url, save_dir / file_name)
+            if status == "downloaded":
+                downloaded += 1
+            elif status == "exists":
+                exists += 1
+            else:
+                not_found += 1
+    else:
+        raise SystemExit(f"unsupported time-period: {time_period}, expected daily or monthly")
+
+    print(
+        f"[setup] download summary: downloaded={downloaded}, existing={exists}, not_found={not_found}",
+        flush=True,
+    )
 
     if not has_kline_data(symbol_upper, interval, trading_type, time_period):
         raise SystemExit(

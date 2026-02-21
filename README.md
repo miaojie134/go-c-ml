@@ -1,6 +1,6 @@
 # LightGBM Quant Starter
 
-基于 Binance 官方 `binance-public-data` 下载的 Kline zip 数据，做特征工程并训练一个二分类 LightGBM 模型：
+基于 Binance 官方公开 Kline 数据，做特征工程并训练一个二分类 LightGBM 模型：
 
 - 标签：未来 `N` 根 K 线收益率是否大于阈值
 - 输出：
@@ -55,14 +55,13 @@ python run_ml.py grid ETHUSDT
 
 首次运行 `run_ml.py` 会自动执行：
 
-- 缺少 `binance-public-data` 时自动 `git clone`
 - 优先复用项目根目录 `.venv`；若不存在才自动创建
 - 缺少依赖时自动 `pip install -r requirements.txt`
-- 若交易对 K 线数据不存在，自动从 Binance 下载对应 `symbol/interval` 数据
+- 若交易对 K 线数据不存在，自动从 Binance 下载对应 `symbol/interval` 数据到 `./data`
 
 Windows 建议在已激活虚拟环境后使用 `python run_ml.py ...`，不要用 `py run_ml.py ...`（`py` 可能跳过当前 venv）。
 
-如果你传了自定义 `DATA_ROOT`，请确保它以 `/data` 结尾，便于自动下载器写入正确目录。
+如果你传了自定义 `DATA_ROOT`，脚本会把数据下载到该目录下的标准结构中。
 
 ## 5) 输出文件命名
 
@@ -76,7 +75,7 @@ Windows 建议在已激活虚拟环境后使用 `python run_ml.py ...`，不要�
 
 ```bash
 python scripts/train_lightgbm.py \
-  --data-root ./binance-public-data/python/data \
+  --data-root ./data \
   --symbol ETHUSDT \
   --interval 15m \
   --trading-type um \
