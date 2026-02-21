@@ -607,10 +607,14 @@ def _run_script_command(
     script_path: str,
     default_pairs: list[tuple[str, object]],
     config_command: str | None = None,
+    config_excludes: set[str] | None = None,
 ) -> None:
+    excludes = set(COMMON_CONFIG_KEYS)
+    if config_excludes:
+        excludes.update(config_excludes)
     cmd = [str(VENV_PY), script_path]
     cmd.extend(_pairs_to_cli_args(_base_script_pairs(ctx) + default_pairs))
-    cmd.extend(_command_args_from_config(config, config_command or ctx.command, COMMON_CONFIG_KEYS))
+    cmd.extend(_command_args_from_config(config, config_command or ctx.command, excludes))
     run(cmd)
 
 
@@ -623,6 +627,26 @@ def _resolve_best_model(prefix: str, symbol: str) -> Path:
         f"best model not found: ./models/{prefix}_best_ls_refine_model.txt or ./models/{prefix}_best_ls_model.txt\n"
         f"run auto-ls first: python run_ml.py auto-ls {symbol}"
     )
+
+
+def _load_best_thresholds(prefix: str) -> tuple[float, float, Path] | None:
+    best_cfg = Path(f"./models/{prefix}_best_ls_config.json")
+    if not best_cfg.is_file():
+        return None
+
+    try:
+        payload = json.loads(best_cfg.read_text(encoding="utf-8"))
+        best = payload.get("best")
+        if not isinstance(best, dict):
+            raise ValueError("missing 'best' object")
+        buy_th = float(best["buy_threshold"])
+        sell_th = float(best["sell_threshold"])
+        if not (0.0 <= sell_th < buy_th <= 1.0):
+            raise ValueError(f"invalid thresholds: buy={buy_th}, sell={sell_th}")
+    except Exception as exc:
+        print(f"[WARN] ignore best config thresholds ({best_cfg}): {exc}", flush=True)
+        return None
+    return buy_th, sell_th, best_cfg
 
 
 def run_train(symbol: str, config: dict) -> None:
@@ -698,8 +722,21 @@ def run_backtest(symbol: str, config: dict, best: bool) -> None:
         model_path = _resolve_best_model(ctx.prefix, symbol)
         mode = str(_command_config(config, command).get("position-mode"))
         print(f"[backtest] symbol={symbol} model={model_path} mode={mode}", flush=True)
+        buy_th = float(_get_config_value(config, command, "buy-threshold"))
+        sell_th = float(_get_config_value(config, command, "sell-threshold"))
+        threshold_source = "run_ml.config.json"
+        best_thresholds = _load_best_thresholds(ctx.prefix)
+        if best_thresholds is not None:
+            buy_th, sell_th, best_cfg = best_thresholds
+            threshold_source = str(best_cfg)
+        print(
+            f"[backtest] thresholds buy={buy_th:.6f} sell={sell_th:.6f} source={threshold_source}",
+            flush=True,
+        )
         default_pairs: list[tuple[str, object]] = [
             ("model-path", str(model_path)),
+            ("buy-threshold", buy_th),
+            ("sell-threshold", sell_th),
             ("summary-out", f"./models/{ctx.prefix}_best_live_summary.json"),
             ("equity-out", f"./models/{ctx.prefix}_best_live_equity.csv"),
         ]
@@ -717,6 +754,7 @@ def run_backtest(symbol: str, config: dict, best: bool) -> None:
         script_path="scripts/backtest_lightgbm.py",
         default_pairs=default_pairs,
         config_command=command,
+        config_excludes={"buy-threshold", "sell-threshold"} if best else None,
     )
 
 

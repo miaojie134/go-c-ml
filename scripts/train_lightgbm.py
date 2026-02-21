@@ -86,6 +86,8 @@ def train_and_evaluate(
     gpu_device_id: int,
     gpu_use_dp: int,
 ) -> tuple[LGBMClassifier, dict]:
+    # LightGBM expects bool-like value for gpu_use_dp on newer versions.
+    gpu_use_dp_flag = bool(gpu_use_dp)
     model = LGBMClassifier(
         objective="binary",
         n_estimators=1000,
@@ -98,7 +100,7 @@ def train_and_evaluate(
         device_type=device_type,
         gpu_platform_id=gpu_platform_id,
         gpu_device_id=gpu_device_id,
-        gpu_use_dp=gpu_use_dp,
+        gpu_use_dp=gpu_use_dp_flag,
         random_state=random_state,
         n_jobs=-1,
     )

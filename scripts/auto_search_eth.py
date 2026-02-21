@@ -205,6 +205,8 @@ def main() -> None:
     buy_grid = frange(args.buy_min, args.buy_max, args.buy_step)
     sell_grid = frange(args.sell_min, args.sell_max, args.sell_step)
     cost_rate = (args.fee_bps + args.slippage_bps) / 10000.0
+    # LightGBM expects bool-like value for gpu_use_dp on newer versions.
+    gpu_use_dp_flag = bool(args.gpu_use_dp)
 
     print("[0/6] loading base data", flush=True)
     raw = load_kline_zip_files(
@@ -257,7 +259,7 @@ def main() -> None:
             device_type=args.device_type,
             gpu_platform_id=args.gpu_platform_id,
             gpu_device_id=args.gpu_device_id,
-            gpu_use_dp=args.gpu_use_dp,
+            gpu_use_dp=gpu_use_dp_flag,
             verbosity=-1,
             random_state=args.random_state,
             n_jobs=-1,
