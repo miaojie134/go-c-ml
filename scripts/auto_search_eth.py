@@ -198,6 +198,12 @@ def main() -> None:
     if args.buy_step <= 0 or args.sell_step <= 0:
         raise ValueError("buy-step/sell-step must be > 0")
 
+    # Ensure output directories exist before any intermediate save_model() calls.
+    os.makedirs(os.path.dirname(args.results_out) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(args.best_json_out) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(args.best_model_out) or ".", exist_ok=True)
+    os.makedirs(os.path.dirname(args.best_equity_out) or ".", exist_ok=True)
+
     horizons = parse_list(args.horizons, int)
     target_thresholds = parse_list(args.target_thresholds, float)
     learning_rates = parse_list(args.learning_rates, float)
