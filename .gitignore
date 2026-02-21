@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 
 .venv/
+binance-public-data/
 binance-public-data/python/.venv/
 binance-public-data/python/data/
 
