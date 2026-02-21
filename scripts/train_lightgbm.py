@@ -311,7 +311,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--target-threshold", type=float, default=0.0, help="future return threshold")
     p.add_argument("--train-ratio", type=float, default=0.8)
     p.add_argument("--random-state", type=int, default=42)
-    p.add_argument("--device-type", default="cpu", choices=["cpu", "gpu", "cuda"])
+    p.add_argument("--device-type", default="cuda", choices=["cpu", "gpu", "cuda"])
     p.add_argument("--gpu-platform-id", type=int, default=0)
     p.add_argument("--gpu-device-id", type=int, default=0)
     p.add_argument("--gpu-use-dp", type=int, default=0, choices=[0, 1])

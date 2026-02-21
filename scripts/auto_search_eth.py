@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--reg-alpha", type=float, default=0.1)
     p.add_argument("--reg-lambda", type=float, default=0.1)
     p.add_argument("--random-state", type=int, default=42)
-    p.add_argument("--device-type", default="cpu", choices=["cpu", "gpu", "cuda"])
+    p.add_argument("--device-type", default="cuda", choices=["cpu", "gpu", "cuda"])
     p.add_argument("--gpu-platform-id", type=int, default=0)
     p.add_argument("--gpu-device-id", type=int, default=0)
     p.add_argument("--gpu-use-dp", type=int, default=0, choices=[0, 1])
