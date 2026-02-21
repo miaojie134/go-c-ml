@@ -14,9 +14,51 @@ os.chdir(ROOT)
 
 BINANCE_DIR = Path(os.getenv("BINANCE_DIR", str(ROOT / "binance-public-data")))
 BINANCE_PY_DIR = Path(os.getenv("BINANCE_PY_DIR", str(BINANCE_DIR / "python")))
-VENV_DIR = Path(os.getenv("VENV_DIR", str(BINANCE_PY_DIR / ".venv")))
-_default_venv_py = VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-VENV_PY = Path(os.getenv("VENV_PY", str(_default_venv_py)))
+PROJECT_VENV_DIR = ROOT / ".venv"
+LEGACY_BINANCE_VENV_DIR = BINANCE_PY_DIR / ".venv"
+
+
+def _venv_python_path(venv_dir: Path) -> Path:
+    return venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def _looks_like_venv_python(python_bin: Path) -> bool:
+    parts = [p.lower() for p in python_bin.parts]
+    return "scripts" in parts or "bin" in parts
+
+
+def _running_in_venv() -> bool:
+    return sys.prefix != getattr(sys, "base_prefix", sys.prefix)
+
+
+def _resolve_default_venv_python() -> Path:
+    env_venv_py = os.getenv("VENV_PY")
+    if env_venv_py:
+        return Path(env_venv_py)
+
+    env_venv_dir = os.getenv("VENV_DIR")
+    if env_venv_dir:
+        return _venv_python_path(Path(env_venv_dir))
+
+    candidates: list[Path] = []
+    running_py = Path(sys.executable)
+    if _running_in_venv() and running_py.is_file():
+        candidates.append(running_py)
+
+    candidates.extend(
+        [
+            _venv_python_path(PROJECT_VENV_DIR),
+            _venv_python_path(LEGACY_BINANCE_VENV_DIR),
+        ]
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return _venv_python_path(PROJECT_VENV_DIR)
+
+
+VENV_PY = _resolve_default_venv_python()
+VENV_DIR = VENV_PY.parent.parent if _looks_like_venv_python(VENV_PY) else PROJECT_VENV_DIR
 DATA_ROOT = Path(os.getenv("DATA_ROOT", str(BINANCE_PY_DIR / "data")))
 INTERVAL = os.getenv("INTERVAL", "15m")
 TRADING_TYPE = os.getenv("TRADING_TYPE", "um")
@@ -27,6 +69,15 @@ END_DATE = os.getenv("END_DATE", "")
 
 def run(cmd: list[str], env: dict[str, str] | None = None) -> None:
     subprocess.run(cmd, check=True, env=env)
+
+
+def python_major_minor(python_bin: Path) -> tuple[int, int]:
+    out = subprocess.check_output(
+        [str(python_bin), "-c", "import sys;print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+        text=True,
+    ).strip()
+    major, minor = out.split(".", 1)
+    return int(major), int(minor)
 
 
 def ensure_binance_repo() -> None:
@@ -49,19 +100,32 @@ def ensure_python() -> None:
 
 
 def ensure_deps() -> None:
-    probe = (
-        "import lightgbm, pandas, numpy, sklearn, pandas_ta"
-    )
+    probe = "import lightgbm, pandas, numpy, sklearn"
     ok = subprocess.run([str(VENV_PY), "-c", probe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
     if ok == 0:
         return
 
+    py_ver = python_major_minor(VENV_PY)
+    if py_ver >= (3, 14):
+        print(
+            "[setup] Python >= 3.14 detected. pandas-ta will be skipped (optional), core training still works.",
+            flush=True,
+        )
+
     print("[setup] installing dependencies ...", flush=True)
-    run([str(VENV_PY), "-m", "pip", "install", "-U", "pip"])
-    run([str(VENV_PY), "-m", "pip", "install", "-r", "requirements.txt"])
-    req2 = BINANCE_PY_DIR / "requirements.txt"
-    if req2.is_file():
-        run([str(VENV_PY), "-m", "pip", "install", "-r", str(req2)])
+    try:
+        run([str(VENV_PY), "-m", "pip", "install", "-U", "pip"])
+        run([str(VENV_PY), "-m", "pip", "install", "-r", "requirements.txt"])
+        req2 = BINANCE_PY_DIR / "requirements.txt"
+        if req2.is_file():
+            run([str(VENV_PY), "-m", "pip", "install", "-r", str(req2)])
+    except subprocess.CalledProcessError as exc:
+        if py_ver >= (3, 14):
+            raise SystemExit(
+                "dependency install failed on Python >= 3.14.\n"
+                "Please use Python 3.10-3.13 virtualenv, or set VENV_PY to an existing project venv python."
+            ) from exc
+        raise
 
 
 def ensure_runtime() -> None:
