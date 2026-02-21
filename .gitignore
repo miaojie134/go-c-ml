@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+
+.venv/
+binance-public-data/python/.venv/
+binance-public-data/python/data/
+
+models/
