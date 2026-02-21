@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import glob
+import json
 import os
 import shutil
 import subprocess
 import sys
 import venv
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib import error as urlerror
@@ -66,6 +68,7 @@ TRADING_TYPE = os.getenv("TRADING_TYPE", "um")
 TIME_PERIOD = os.getenv("TIME_PERIOD", "daily")
 START_DATE = os.getenv("START_DATE", "2023-01-01")
 END_DATE = os.getenv("END_DATE", "")
+DEFAULT_CONFIG_PATH = ROOT / "run_ml.config.json"
 
 
 def run(cmd: list[str], env: dict[str, str] | None = None) -> None:
@@ -139,67 +142,226 @@ def shutil_which(binary: str) -> str | None:
     return None
 
 
-def require_symbol(command_name: str, args: list[str]) -> tuple[str, list[str]]:
-    if not args or args[0].startswith("-"):
-        print(f"error: SYMBOL is required for '{command_name}'", file=sys.stderr)
-        print(f"example: python run_ml.py {command_name} ETHUSDT", file=sys.stderr)
-        raise SystemExit(2)
-    return args[0], args[1:]
-
-
-def resolve_common_overrides(extra_args: list[str]) -> tuple[str, str, str, str, str]:
-    interval = INTERVAL
-    trading_type = TRADING_TYPE
-    time_period = TIME_PERIOD
-    start_date = START_DATE
-    end_date = END_DATE
-
+def _extract_config_arg(args: list[str]) -> tuple[Path | None, list[str]]:
+    out: list[str] = []
+    config_path: Path | None = None
     i = 0
-    while i < len(extra_args):
-        token = extra_args[i]
-        if token == "--interval" and i + 1 < len(extra_args):
-            interval = extra_args[i + 1]
+    while i < len(args):
+        token = args[i]
+        if token == "--config":
+            if i + 1 >= len(args):
+                raise SystemExit("missing value for --config")
+            config_path = Path(args[i + 1])
             i += 2
             continue
-        if token.startswith("--interval="):
-            interval = token.split("=", 1)[1]
+        if token.startswith("--config="):
+            config_path = Path(token.split("=", 1)[1])
             i += 1
             continue
-        if token == "--trading-type" and i + 1 < len(extra_args):
-            trading_type = extra_args[i + 1]
-            i += 2
-            continue
-        if token.startswith("--trading-type="):
-            trading_type = token.split("=", 1)[1]
-            i += 1
-            continue
-        if token == "--time-period" and i + 1 < len(extra_args):
-            time_period = extra_args[i + 1]
-            i += 2
-            continue
-        if token.startswith("--time-period="):
-            time_period = token.split("=", 1)[1]
-            i += 1
-            continue
-        if token == "--start-date" and i + 1 < len(extra_args):
-            start_date = extra_args[i + 1]
-            i += 2
-            continue
-        if token.startswith("--start-date="):
-            start_date = token.split("=", 1)[1]
-            i += 1
-            continue
-        if token == "--end-date" and i + 1 < len(extra_args):
-            end_date = extra_args[i + 1]
-            i += 2
-            continue
-        if token.startswith("--end-date="):
-            end_date = token.split("=", 1)[1]
-            i += 1
-            continue
+        out.append(token)
         i += 1
+    return config_path, out
 
-    return interval, trading_type, time_period, start_date, end_date
+
+def _load_config(config_path: Path | None) -> dict:
+    path = config_path
+    if path is None and DEFAULT_CONFIG_PATH.is_file():
+        path = DEFAULT_CONFIG_PATH
+    if path is None:
+        return {}
+    if not path.is_file():
+        raise SystemExit(f"config file not found: {path}")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid JSON config: {path} ({exc})") from exc
+
+
+COMMON_CONFIG_KEYS = {"symbol", "interval", "trading-type", "time-period", "start-date", "end-date"}
+SUPPORTED_COMMANDS = ("data", "train", "auto", "auto-ls", "backtest", "backtest-best", "grid")
+REQUIRED_COMMAND_KEYS: dict[str, tuple[str, ...]] = {
+    "train": (
+        "horizon",
+        "target-threshold",
+        "train-ratio",
+        "device-type",
+        "gpu-platform-id",
+        "gpu-device-id",
+        "gpu-use-dp",
+    ),
+    "auto": (
+        "train-ratio",
+        "val-ratio",
+        "horizons",
+        "target-thresholds",
+        "learning-rates",
+        "num-leaves",
+        "n-estimators",
+        "early-stop-rounds",
+        "subsample",
+        "colsample-bytree",
+        "reg-alpha",
+        "reg-lambda",
+        "random-state",
+        "device-type",
+        "gpu-platform-id",
+        "gpu-device-id",
+        "gpu-use-dp",
+        "buy-min",
+        "buy-max",
+        "buy-step",
+        "sell-min",
+        "sell-max",
+        "sell-step",
+        "fee-bps",
+        "slippage-bps",
+        "min-trades",
+        "min-trades-per-day",
+        "min-sharpe",
+        "max-drawdown-limit",
+        "min-return",
+        "optimize",
+        "position-mode",
+    ),
+    "auto-ls": (
+        "train-ratio",
+        "val-ratio",
+        "horizons",
+        "target-thresholds",
+        "learning-rates",
+        "num-leaves",
+        "n-estimators",
+        "early-stop-rounds",
+        "subsample",
+        "colsample-bytree",
+        "reg-alpha",
+        "reg-lambda",
+        "random-state",
+        "device-type",
+        "gpu-platform-id",
+        "gpu-device-id",
+        "gpu-use-dp",
+        "buy-min",
+        "buy-max",
+        "buy-step",
+        "sell-min",
+        "sell-max",
+        "sell-step",
+        "fee-bps",
+        "slippage-bps",
+        "min-trades",
+        "min-trades-per-day",
+        "min-sharpe",
+        "max-drawdown-limit",
+        "min-return",
+        "optimize",
+        "position-mode",
+    ),
+    "backtest": (
+        "test-ratio",
+        "buy-threshold",
+        "sell-threshold",
+        "position-mode",
+        "fee-bps",
+        "slippage-bps",
+    ),
+    "backtest-best": (
+        "test-ratio",
+        "buy-threshold",
+        "sell-threshold",
+        "position-mode",
+        "fee-bps",
+        "slippage-bps",
+    ),
+    "grid": (
+        "test-ratio",
+        "fee-bps",
+        "slippage-bps",
+        "buy-min",
+        "buy-max",
+        "buy-step",
+        "sell-min",
+        "sell-max",
+        "sell-step",
+        "min-trades",
+        "optimize",
+        "top-k",
+    ),
+}
+
+
+def _common_config(config: dict) -> dict:
+    value = config.get("common", {})
+    return value if isinstance(value, dict) else {}
+
+
+def _command_config(config: dict, command: str) -> dict:
+    commands = config.get("commands", {})
+    if not isinstance(commands, dict):
+        return {}
+    value = commands.get(command, {})
+    return value if isinstance(value, dict) else {}
+
+
+def _get_config_value(config: dict, command: str, key: str, default=None):
+    cmd_cfg = _command_config(config, command)
+    if key in cmd_cfg:
+        return cmd_cfg[key]
+    common_cfg = _common_config(config)
+    if key in common_cfg:
+        return common_cfg[key]
+    if key == "symbol" and "symbol" in config:
+        return config["symbol"]
+    return default
+
+
+def _value_to_cli_args(key: str, value) -> list[str]:
+    if value is None:
+        return []
+    flag = f"--{key}"
+    if isinstance(value, bool):
+        return [flag] if value else []
+    if isinstance(value, list):
+        return [flag, ",".join(str(x) for x in value)]
+    return [flag, str(value)]
+
+
+def _command_args_from_config(config: dict, command: str, excludes: set[str] | None = None) -> list[str]:
+    excludes = excludes or set()
+    args: list[str] = []
+    cmd_cfg = _command_config(config, command)
+    for key, value in cmd_cfg.items():
+        if key in excludes:
+            continue
+        args.extend(_value_to_cli_args(key, value))
+    return args
+
+
+def _resolve_symbol(config: dict, command: str, cli_symbol: str | None) -> str:
+    if cli_symbol:
+        return cli_symbol
+    from_config = _get_config_value(config, command, "symbol", None)
+    if from_config:
+        return str(from_config)
+    print(f"error: SYMBOL is required for '{command}'", file=sys.stderr)
+    print(f"example: python run_ml.py {command} ETHUSDT", file=sys.stderr)
+    print("or set symbol in run_ml.config.json", file=sys.stderr)
+    raise SystemExit(2)
+
+
+def _validate_required_command_keys(config: dict, command: str) -> None:
+    required = REQUIRED_COMMAND_KEYS.get(command)
+    if not required:
+        return
+    cmd_cfg = _command_config(config, command)
+    missing = [k for k in required if k not in cmd_cfg]
+    if not missing:
+        return
+    miss = ", ".join(missing)
+    raise SystemExit(
+        f"missing required config keys for '{command}': {miss}\n"
+        f"please fill commands.{command} in run_ml.config.json (see run_ml.config.example.json)"
+    )
 
 
 def has_kline_data(symbol_upper: str, interval: str, trading_type: str, time_period: str) -> bool:
@@ -259,6 +421,13 @@ def _download_to_file(url: str, target_path: Path) -> str:
         raise
 
 
+def _render_progress(prefix: str, index: int, total: int, status: str, label: str) -> None:
+    percent = int(index * 100 / total) if total > 0 else 100
+    line = f"\r[setup] {prefix} {index}/{total} ({percent}%) {status:<10} {label}"
+    end = "\n" if index >= total else ""
+    print(line, end=end, flush=True)
+
+
 def ensure_kline_data(
     symbol: str,
     interval: str,
@@ -279,6 +448,28 @@ def ensure_kline_data(
     save_dir = DATA_ROOT / "futures" / trading_type / time_period / "klines" / symbol_upper / interval
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    download_plan: list[tuple[str, Path, str]] = []
+    if time_period == "daily":
+        cur = start_day
+        while cur <= end_day:
+            day_str = cur.isoformat()
+            file_name = f"{symbol_upper}-{interval}-{day_str}.zip"
+            url = f"{BINANCE_DATA_BASE_URL}/{trading_type}/daily/klines/{symbol_upper}/{interval}/{file_name}"
+            download_plan.append((url, save_dir / file_name, day_str))
+            cur += timedelta(days=1)
+    elif time_period == "monthly":
+        for month_start in _iter_month_starts(start_day, end_day):
+            month_str = f"{month_start.year:04d}-{month_start.month:02d}"
+            file_name = f"{symbol_upper}-{interval}-{month_str}.zip"
+            url = f"{BINANCE_DATA_BASE_URL}/{trading_type}/monthly/klines/{symbol_upper}/{interval}/{file_name}"
+            download_plan.append((url, save_dir / file_name, month_str))
+    else:
+        raise SystemExit(f"unsupported time-period: {time_period}, expected daily or monthly")
+
+    total = len(download_plan)
+    if total == 0:
+        raise SystemExit("download plan is empty, please check start-date/end-date")
+
     downloaded = 0
     exists = 0
     not_found = 0
@@ -286,35 +477,16 @@ def ensure_kline_data(
         f"[setup] data not found, downloading klines from Binance: symbol={symbol_upper} interval={interval} type={trading_type} period={time_period}",
         flush=True,
     )
-
-    if time_period == "daily":
-        cur = start_day
-        while cur <= end_day:
-            day_str = cur.isoformat()
-            file_name = f"{symbol_upper}-{interval}-{day_str}.zip"
-            url = f"{BINANCE_DATA_BASE_URL}/{trading_type}/daily/klines/{symbol_upper}/{interval}/{file_name}"
-            status = _download_to_file(url, save_dir / file_name)
-            if status == "downloaded":
-                downloaded += 1
-            elif status == "exists":
-                exists += 1
-            else:
-                not_found += 1
-            cur += timedelta(days=1)
-    elif time_period == "monthly":
-        for month_start in _iter_month_starts(start_day, end_day):
-            month_str = f"{month_start.year:04d}-{month_start.month:02d}"
-            file_name = f"{symbol_upper}-{interval}-{month_str}.zip"
-            url = f"{BINANCE_DATA_BASE_URL}/{trading_type}/monthly/klines/{symbol_upper}/{interval}/{file_name}"
-            status = _download_to_file(url, save_dir / file_name)
-            if status == "downloaded":
-                downloaded += 1
-            elif status == "exists":
-                exists += 1
-            else:
-                not_found += 1
-    else:
-        raise SystemExit(f"unsupported time-period: {time_period}, expected daily or monthly")
+    print(f"[setup] download plan: {total} files", flush=True)
+    for i, (url, target_path, label) in enumerate(download_plan, start=1):
+        status = _download_to_file(url, target_path)
+        if status == "downloaded":
+            downloaded += 1
+        elif status == "exists":
+            exists += 1
+        else:
+            not_found += 1
+        _render_progress("download", i, total, status, label)
 
     print(
         f"[setup] download summary: downloaded={downloaded}, existing={exists}, not_found={not_found}",
@@ -336,9 +508,10 @@ def to_prefix(symbol: str) -> str:
 
 def usage() -> str:
     return """Usage:
-  python run_ml.py <command> SYMBOL [extra args...]
+  python run_ml.py <command> [SYMBOL] [--config path.json]
 
 Commands:
+  data          Download kline data only (no training)
   train         Train one model
   auto          Auto-search long_only config
   auto-ls       Auto-search long_short config
@@ -346,267 +519,249 @@ Commands:
   backtest-best Backtest best long_short model
   grid          Grid-search thresholds on quant model
 
+Config:
+  --config <path>    Load settings from JSON config.
+  default config     If ./run_ml.config.json exists, it is auto-loaded.
+  precedence         command config > common config; SYMBOL can be overridden by CLI.
+
 Examples:
+  python run_ml.py train --config run_ml.config.json
+  python run_ml.py data ETHUSDT
   python run_ml.py train ETHUSDT
-  python run_ml.py train BTCUSDT --start-date 2022-01-01
   python run_ml.py auto-ls ETHUSDT
   python run_ml.py backtest ETHUSDT
 """
 
 
-def run_train(symbol: str, extra_args: list[str]) -> None:
-    ensure_runtime()
-    interval, trading_type, time_period, start_date, end_date = resolve_common_overrides(extra_args)
-    ensure_kline_data(symbol, interval, trading_type, time_period, start_date, end_date)
-    prefix = to_prefix(symbol)
-    print(f"[train] symbol={symbol} interval={interval} start_date={start_date} device=cuda out_prefix={prefix}", flush=True)
-    cmd = [
-        str(VENV_PY),
-        "scripts/train_lightgbm.py",
-        "--data-root",
-        str(DATA_ROOT),
-        "--symbol",
-        symbol,
-        "--interval",
-        interval,
-        "--trading-type",
-        trading_type,
-        "--time-period",
-        time_period,
-        "--start-date",
-        start_date,
-        "--model-out",
-        f"./models/{prefix}_quant_model.txt",
-        "--metrics-out",
-        f"./models/{prefix}_metrics.json",
-        "--importance-out",
-        f"./models/{prefix}_feature_importance.csv",
+@dataclass(frozen=True)
+class CommonSettings:
+    interval: str
+    trading_type: str
+    time_period: str
+    start_date: str
+    end_date: str
+
+
+@dataclass(frozen=True)
+class CommandContext:
+    command: str
+    symbol: str
+    prefix: str
+    settings: CommonSettings
+
+
+def _as_config_str(value, default: str) -> str:
+    if value is None:
+        return default
+    return str(value)
+
+
+def _resolve_common_settings(config: dict, command: str) -> CommonSettings:
+    return CommonSettings(
+        interval=_as_config_str(_get_config_value(config, command, "interval", INTERVAL), INTERVAL),
+        trading_type=_as_config_str(_get_config_value(config, command, "trading-type", TRADING_TYPE), TRADING_TYPE),
+        time_period=_as_config_str(_get_config_value(config, command, "time-period", TIME_PERIOD), TIME_PERIOD),
+        start_date=_as_config_str(_get_config_value(config, command, "start-date", START_DATE), START_DATE),
+        end_date=_as_config_str(_get_config_value(config, command, "end-date", END_DATE), END_DATE),
+    )
+
+
+def _pairs_to_cli_args(pairs: list[tuple[str, object]]) -> list[str]:
+    args: list[str] = []
+    for key, value in pairs:
+        args.extend(_value_to_cli_args(key, value))
+    return args
+
+
+def _base_script_pairs(ctx: CommandContext) -> list[tuple[str, object]]:
+    pairs: list[tuple[str, object]] = [
+        ("data-root", str(DATA_ROOT)),
+        ("symbol", ctx.symbol),
+        ("interval", ctx.settings.interval),
+        ("trading-type", ctx.settings.trading_type),
+        ("time-period", ctx.settings.time_period),
+        ("start-date", ctx.settings.start_date),
     ]
-    if end_date:
-        cmd.extend(["--end-date", end_date])
-    cmd.extend(extra_args)
+    if ctx.settings.end_date:
+        pairs.append(("end-date", ctx.settings.end_date))
+    return pairs
+
+
+def _prepare_context(symbol: str, config: dict, command: str) -> CommandContext:
+    ensure_runtime()
+    settings = _resolve_common_settings(config, command)
+    ensure_kline_data(
+        symbol=symbol,
+        interval=settings.interval,
+        trading_type=settings.trading_type,
+        time_period=settings.time_period,
+        start_date=settings.start_date,
+        end_date=settings.end_date,
+    )
+    return CommandContext(command=command, symbol=symbol, prefix=to_prefix(symbol), settings=settings)
+
+
+def _run_script_command(
+    ctx: CommandContext,
+    config: dict,
+    script_path: str,
+    default_pairs: list[tuple[str, object]],
+    config_command: str | None = None,
+) -> None:
+    cmd = [str(VENV_PY), script_path]
+    cmd.extend(_pairs_to_cli_args(_base_script_pairs(ctx) + default_pairs))
+    cmd.extend(_command_args_from_config(config, config_command or ctx.command, COMMON_CONFIG_KEYS))
     run(cmd)
 
 
-def run_auto(symbol: str, extra_args: list[str], long_short: bool) -> None:
-    ensure_runtime()
-    interval, trading_type, time_period, start_date, end_date = resolve_common_overrides(extra_args)
-    ensure_kline_data(symbol, interval, trading_type, time_period, start_date, end_date)
-    prefix = to_prefix(symbol)
-    mode = "long_short" if long_short else "long_only"
-    print(f"[auto] symbol={symbol} mode={mode} interval={interval} start_date={start_date} device=cuda", flush=True)
-    cmd = [
-        str(VENV_PY),
-        "scripts/auto_search_eth.py",
-        "--data-root",
-        str(DATA_ROOT),
-        "--symbol",
-        symbol,
-        "--interval",
-        interval,
-        "--trading-type",
-        trading_type,
-        "--time-period",
-        time_period,
-        "--start-date",
-        start_date,
-        "--train-ratio",
-        "0.7",
-        "--val-ratio",
-        "0.85",
-        "--horizons",
-        "1,2,3,4,6" if long_short else "1,2,3,4",
-        "--target-thresholds",
-        "0.0,0.0005,0.001",
-        "--learning-rates",
-        "0.02,0.05",
-        "--num-leaves",
-        "31,63,127",
-        "--n-estimators",
-        "700",
-        "--early-stop-rounds",
-        "80",
-        "--buy-min",
-        "0.52",
-        "--buy-max",
-        "0.80",
-        "--buy-step",
-        "0.02",
-        "--sell-min",
-        "0.20",
-        "--sell-max",
-        "0.48" if long_short else "0.50",
-        "--sell-step",
-        "0.02",
-        "--fee-bps",
-        "5",
-        "--slippage-bps",
-        "1",
-        "--min-trades",
-        "20" if long_short else "8",
-        "--optimize",
-        "strategy_total_return",
-        "--results-out",
-        f"./models/{prefix}_{'auto_search_ls_results' if long_short else 'auto_search_results'}.csv",
-        "--best-json-out",
-        f"./models/{prefix}_{'best_ls_config' if long_short else 'best_config'}.json",
-        "--best-model-out",
-        f"./models/{prefix}_{'best_ls_model' if long_short else 'best_model'}.txt",
-        "--best-equity-out",
-        f"./models/{prefix}_{'best_ls_equity' if long_short else 'best_equity'}.csv",
+def _resolve_best_model(prefix: str, symbol: str) -> Path:
+    best_model_refine = Path(f"./models/{prefix}_best_ls_refine_model.txt")
+    best_model = best_model_refine if best_model_refine.is_file() else Path(f"./models/{prefix}_best_ls_model.txt")
+    if best_model.is_file():
+        return best_model
+    raise SystemExit(
+        f"best model not found: ./models/{prefix}_best_ls_refine_model.txt or ./models/{prefix}_best_ls_model.txt\n"
+        f"run auto-ls first: python run_ml.py auto-ls {symbol}"
+    )
+
+
+def run_train(symbol: str, config: dict) -> None:
+    _validate_required_command_keys(config, "train")
+    ctx = _prepare_context(symbol, config, "train")
+    print(
+        f"[train] symbol={symbol} interval={ctx.settings.interval} start_date={ctx.settings.start_date} device=cuda out_prefix={ctx.prefix}",
+        flush=True,
+    )
+    _run_script_command(
+        ctx=ctx,
+        config=config,
+        script_path="scripts/train_lightgbm.py",
+        default_pairs=[
+            ("model-out", f"./models/{ctx.prefix}_quant_model.txt"),
+            ("metrics-out", f"./models/{ctx.prefix}_metrics.json"),
+            ("importance-out", f"./models/{ctx.prefix}_feature_importance.csv"),
+        ],
+    )
+
+
+def run_data(symbol: str, config: dict) -> None:
+    ctx = _prepare_context(symbol, config, "data")
+    print(
+        f"[data] symbol={symbol} interval={ctx.settings.interval} type={ctx.settings.trading_type} "
+        f"period={ctx.settings.time_period} start={ctx.settings.start_date} end={ctx.settings.end_date or 'latest'}",
+        flush=True,
+    )
+    save_dir = (
+        DATA_ROOT
+        / "futures"
+        / ctx.settings.trading_type
+        / ctx.settings.time_period
+        / "klines"
+        / symbol.upper()
+        / ctx.settings.interval
+    )
+    print(f"[data] ready: {save_dir}", flush=True)
+
+
+def run_auto(symbol: str, config: dict, long_short: bool) -> None:
+    command = "auto-ls" if long_short else "auto"
+    _validate_required_command_keys(config, command)
+    ctx = _prepare_context(symbol, config, command)
+    mode = str(_command_config(config, command).get("position-mode"))
+    print(
+        f"[auto] symbol={symbol} mode={mode} interval={ctx.settings.interval} start_date={ctx.settings.start_date} device=cuda",
+        flush=True,
+    )
+    suffix = "_ls" if long_short else ""
+    default_pairs: list[tuple[str, object]] = [
+        ("results-out", f"./models/{ctx.prefix}_auto_search{suffix}_results.csv"),
+        ("best-json-out", f"./models/{ctx.prefix}_best{suffix}_config.json"),
+        ("best-model-out", f"./models/{ctx.prefix}_best{suffix}_model.txt"),
+        ("best-equity-out", f"./models/{ctx.prefix}_best{suffix}_equity.csv"),
     ]
-    if long_short:
-        cmd.extend(["--position-mode", "long_short"])
-    if end_date:
-        cmd.extend(["--end-date", end_date])
-    cmd.extend(extra_args)
-    run(cmd)
+
+    _run_script_command(
+        ctx=ctx,
+        config=config,
+        script_path="scripts/auto_search_eth.py",
+        default_pairs=default_pairs,
+        config_command=command,
+    )
 
 
-def run_backtest(symbol: str, extra_args: list[str], best: bool) -> None:
-    ensure_runtime()
-    interval, trading_type, time_period, start_date, end_date = resolve_common_overrides(extra_args)
-    ensure_kline_data(symbol, interval, trading_type, time_period, start_date, end_date)
-    prefix = to_prefix(symbol)
+def run_backtest(symbol: str, config: dict, best: bool) -> None:
+    command = "backtest-best" if best else "backtest"
+    _validate_required_command_keys(config, command)
+    ctx = _prepare_context(symbol, config, command)
 
     if best:
-        best_model_refine = Path(f"./models/{prefix}_best_ls_refine_model.txt")
-        best_model = best_model_refine if best_model_refine.is_file() else Path(f"./models/{prefix}_best_ls_model.txt")
-        if not best_model.is_file():
-            raise SystemExit(
-                f"best model not found: ./models/{prefix}_best_ls_refine_model.txt or ./models/{prefix}_best_ls_model.txt\n"
-                f"run auto-ls first: python run_ml.py auto-ls {symbol}"
-            )
-        print(f"[backtest] symbol={symbol} model={best_model} mode=long_short", flush=True)
-        cmd = [
-            str(VENV_PY),
-            "scripts/backtest_lightgbm.py",
-            "--data-root",
-            str(DATA_ROOT),
-            "--model-path",
-            str(best_model),
-            "--symbol",
-            symbol,
-            "--interval",
-            interval,
-            "--trading-type",
-            trading_type,
-            "--time-period",
-            time_period,
-            "--start-date",
-            start_date,
-            "--position-mode",
-            "long_short",
-            "--buy-threshold",
-            "0.54",
-            "--sell-threshold",
-            "0.14",
-            "--fee-bps",
-            "5",
-            "--slippage-bps",
-            "1",
-            "--summary-out",
-            f"./models/{prefix}_best_live_summary.json",
-            "--equity-out",
-            f"./models/{prefix}_best_live_equity.csv",
+        model_path = _resolve_best_model(ctx.prefix, symbol)
+        mode = str(_command_config(config, command).get("position-mode"))
+        print(f"[backtest] symbol={symbol} model={model_path} mode={mode}", flush=True)
+        default_pairs: list[tuple[str, object]] = [
+            ("model-path", str(model_path)),
+            ("summary-out", f"./models/{ctx.prefix}_best_live_summary.json"),
+            ("equity-out", f"./models/{ctx.prefix}_best_live_equity.csv"),
         ]
     else:
-        print(f"[backtest] symbol={symbol} model=./models/{prefix}_quant_model.txt", flush=True)
-        cmd = [
-            str(VENV_PY),
-            "scripts/backtest_lightgbm.py",
-            "--data-root",
-            str(DATA_ROOT),
-            "--model-path",
-            f"./models/{prefix}_quant_model.txt",
-            "--symbol",
-            symbol,
-            "--interval",
-            interval,
-            "--trading-type",
-            trading_type,
-            "--time-period",
-            time_period,
-            "--start-date",
-            start_date,
-            "--buy-threshold",
-            "0.55",
-            "--sell-threshold",
-            "0.45",
-            "--fee-bps",
-            "5",
-            "--slippage-bps",
-            "1",
-            "--summary-out",
-            f"./models/{prefix}_backtest_summary.json",
-            "--equity-out",
-            f"./models/{prefix}_backtest_equity.csv",
+        print(f"[backtest] symbol={symbol} model=./models/{ctx.prefix}_quant_model.txt", flush=True)
+        default_pairs = [
+            ("model-path", f"./models/{ctx.prefix}_quant_model.txt"),
+            ("summary-out", f"./models/{ctx.prefix}_backtest_summary.json"),
+            ("equity-out", f"./models/{ctx.prefix}_backtest_equity.csv"),
         ]
 
-    if end_date:
-        cmd.extend(["--end-date", end_date])
-    cmd.extend(extra_args)
-    run(cmd)
+    _run_script_command(
+        ctx=ctx,
+        config=config,
+        script_path="scripts/backtest_lightgbm.py",
+        default_pairs=default_pairs,
+        config_command=command,
+    )
 
 
-def run_grid(symbol: str, extra_args: list[str]) -> None:
-    ensure_runtime()
-    interval, trading_type, time_period, start_date, end_date = resolve_common_overrides(extra_args)
-    ensure_kline_data(symbol, interval, trading_type, time_period, start_date, end_date)
-    prefix = to_prefix(symbol)
-    print(f"[grid] symbol={symbol} model=./models/{prefix}_quant_model.txt", flush=True)
-    cmd = [
-        str(VENV_PY),
-        "scripts/grid_search_backtest.py",
-        "--data-root",
-        str(DATA_ROOT),
-        "--model-path",
-        f"./models/{prefix}_quant_model.txt",
-        "--symbol",
-        symbol,
-        "--interval",
-        interval,
-        "--trading-type",
-        trading_type,
-        "--time-period",
-        time_period,
-        "--start-date",
-        start_date,
-        "--test-ratio",
-        "0.8",
-        "--fee-bps",
-        "5",
-        "--slippage-bps",
-        "1",
-        "--buy-min",
-        "0.52",
-        "--buy-max",
-        "0.72",
-        "--buy-step",
-        "0.02",
-        "--sell-min",
-        "0.30",
-        "--sell-max",
-        "0.50",
-        "--sell-step",
-        "0.02",
-        "--min-trades",
-        "20",
-        "--optimize",
-        "sharpe",
-        "--top-k",
-        "15",
-        "--results-out",
-        f"./models/{prefix}_grid_results.csv",
-        "--best-out",
-        f"./models/{prefix}_grid_best.json",
-        "--best-equity-out",
-        f"./models/{prefix}_grid_best_equity.csv",
-    ]
-    if end_date:
-        cmd.extend(["--end-date", end_date])
-    cmd.extend(extra_args)
-    run(cmd)
+def run_grid(symbol: str, config: dict) -> None:
+    _validate_required_command_keys(config, "grid")
+    ctx = _prepare_context(symbol, config, "grid")
+    print(f"[grid] symbol={symbol} model=./models/{ctx.prefix}_quant_model.txt", flush=True)
+    _run_script_command(
+        ctx=ctx,
+        config=config,
+        script_path="scripts/grid_search_backtest.py",
+        default_pairs=[
+            ("model-path", f"./models/{ctx.prefix}_quant_model.txt"),
+            ("results-out", f"./models/{ctx.prefix}_grid_results.csv"),
+            ("best-out", f"./models/{ctx.prefix}_grid_best.json"),
+            ("best-equity-out", f"./models/{ctx.prefix}_grid_best_equity.csv"),
+        ],
+    )
+
+
+def run_auto_ls(symbol: str, config: dict) -> None:
+    run_auto(symbol, config, long_short=True)
+
+
+def run_auto_long_only(symbol: str, config: dict) -> None:
+    run_auto(symbol, config, long_short=False)
+
+
+def run_backtest_best(symbol: str, config: dict) -> None:
+    run_backtest(symbol, config, best=True)
+
+
+def run_backtest_quant(symbol: str, config: dict) -> None:
+    run_backtest(symbol, config, best=False)
+
+
+COMMAND_RUNNERS = {
+    "data": run_data,
+    "train": run_train,
+    "auto": run_auto_long_only,
+    "auto-ls": run_auto_ls,
+    "backtest": run_backtest_quant,
+    "backtest-best": run_backtest_best,
+    "grid": run_grid,
+}
 
 
 def main(argv: list[str]) -> int:
@@ -616,26 +771,25 @@ def main(argv: list[str]) -> int:
 
     cmd = argv[0]
     args = argv[1:]
-    if cmd not in {"train", "auto", "auto-ls", "backtest", "backtest-best", "grid"}:
+    if cmd not in SUPPORTED_COMMANDS:
         print(f"unknown command: {cmd}", file=sys.stderr)
         print()
         print(usage())
         return 1
 
-    symbol, extra_args = require_symbol(cmd, args)
+    config_path, args_wo_config = _extract_config_arg(args)
+    config = _load_config(config_path)
+    cli_symbol: str | None = None
+    if args_wo_config and not args_wo_config[0].startswith("-"):
+        cli_symbol = args_wo_config[0]
+        args_wo_config = args_wo_config[1:]
+    if args_wo_config:
+        raise SystemExit(
+            "command-line parameter overrides are disabled; put parameters in run_ml.config.json or pass --config path"
+        )
+    symbol = _resolve_symbol(config, cmd, cli_symbol)
 
-    if cmd == "train":
-        run_train(symbol, extra_args)
-    elif cmd == "auto":
-        run_auto(symbol, extra_args, long_short=False)
-    elif cmd == "auto-ls":
-        run_auto(symbol, extra_args, long_short=True)
-    elif cmd == "backtest":
-        run_backtest(symbol, extra_args, best=False)
-    elif cmd == "backtest-best":
-        run_backtest(symbol, extra_args, best=True)
-    elif cmd == "grid":
-        run_grid(symbol, extra_args)
+    COMMAND_RUNNERS[cmd](symbol, config)
     return 0
 
 

@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import argparse
-import glob
 import json
 import os
 from dataclasses import dataclass
@@ -10,20 +9,7 @@ import pandas as pd
 from lightgbm import LGBMClassifier, early_stopping, log_evaluation
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
 
-KLINE_COLUMNS = [
-    "open_time",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "close_time",
-    "quote_asset_volume",
-    "number_of_trades",
-    "taker_buy_base_asset_volume",
-    "taker_buy_quote_asset_volume",
-    "ignore",
-]
+from ml_common import add_features, apply_date_filter, load_kline_zip_files
 
 
 @dataclass
@@ -36,108 +22,6 @@ class Dataset:
     raw: pd.DataFrame
 
 
-def load_kline_zip_files(data_root: str, symbol: str, interval: str, trading_type: str, time_period: str) -> pd.DataFrame:
-    pattern = os.path.join(
-        data_root,
-        "futures",
-        trading_type,
-        time_period,
-        "klines",
-        symbol.upper(),
-        interval,
-        f"{symbol.upper()}-{interval}-*.zip",
-    )
-    files = sorted(glob.glob(pattern))
-    if not files:
-        raise FileNotFoundError(f"no zip files found: {pattern}")
-
-    print(f"[1/4] loading {len(files)} zip files from: {os.path.dirname(pattern)}", flush=True)
-    frames: list[pd.DataFrame] = []
-    for i, f in enumerate(files, start=1):
-        try:
-            df = pd.read_csv(f, header=None)
-            if df.shape[1] < len(KLINE_COLUMNS):
-                print(f"[WARN] skip malformed file: {f}")
-                continue
-            df = df.iloc[:, : len(KLINE_COLUMNS)]
-            df.columns = KLINE_COLUMNS
-            frames.append(df)
-            if i % 200 == 0 or i == len(files):
-                print(f"[1/4] loaded {i}/{len(files)} files", flush=True)
-        except Exception as e:
-            print(f"[WARN] skip broken file: {f}, reason={e}")
-
-    if not frames:
-        raise RuntimeError("all zip files failed to read")
-
-    out = pd.concat(frames, ignore_index=True)
-    # Some Binance files include header-like text rows ("open_time", ...).
-    # Coerce all numeric fields and drop invalid rows before timestamp parsing.
-    for c in KLINE_COLUMNS:
-        out[c] = pd.to_numeric(out[c], errors="coerce")
-
-    required = ["open_time", "open", "high", "low", "close", "volume"]
-    before = len(out)
-    out = out.dropna(subset=required).copy()
-    dropped = before - len(out)
-    if dropped > 0:
-        print(f"[1/4] dropped {dropped} invalid rows", flush=True)
-
-    out["open_time"] = pd.to_datetime(out["open_time"].astype("int64"), unit="ms", utc=True)
-    out = out.sort_values("open_time").drop_duplicates("open_time").reset_index(drop=True)
-    print(f"[1/4] final rows: {len(out)}", flush=True)
-    return out
-
-
-def add_features(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out["ret_1"] = out["close"].pct_change(1)
-    out["ret_2"] = out["close"].pct_change(2)
-    out["ret_4"] = out["close"].pct_change(4)
-    out["ret_8"] = out["close"].pct_change(8)
-    out["range_hl"] = (out["high"] - out["low"]) / out["close"]
-    out["range_oc"] = (out["close"] - out["open"]) / out["open"]
-    out["volume_chg_1"] = out["volume"].pct_change(1)
-    out["trade_count_chg_1"] = out["number_of_trades"].pct_change(1)
-
-    for w in (5, 10, 20, 48, 96):
-        out[f"volatility_{w}"] = out["ret_1"].rolling(w).std()
-        out[f"price_ma_ratio_{w}"] = out["close"] / out["close"].rolling(w).mean() - 1
-        out[f"volume_ma_ratio_{w}"] = out["volume"] / out["volume"].rolling(w).mean() - 1
-
-    try:
-        import pandas_ta as ta
-
-        out["ema_12"] = ta.ema(out["close"], length=12)
-        out["ema_26"] = ta.ema(out["close"], length=26)
-        out["ema_50"] = ta.ema(out["close"], length=50)
-        out["sma_20"] = ta.sma(out["close"], length=20)
-        out["sma_60"] = ta.sma(out["close"], length=60)
-        out["rsi_14"] = ta.rsi(out["close"], length=14)
-        out["rsi_28"] = ta.rsi(out["close"], length=28)
-        out["atr_14"] = ta.atr(out["high"], out["low"], out["close"], length=14)
-
-        macd = ta.macd(out["close"], fast=12, slow=26, signal=9)
-        if macd is not None:
-            out = out.join(macd)
-
-        bbands = ta.bbands(out["close"], length=20, std=2)
-        if bbands is not None:
-            out = out.join(bbands)
-
-        stoch = ta.stoch(out["high"], out["low"], out["close"], k=14, d=3, smooth_k=3)
-        if stoch is not None:
-            out = out.join(stoch)
-
-        adx = ta.adx(out["high"], out["low"], out["close"], length=14)
-        if adx is not None:
-            out = out.join(adx)
-    except Exception as e:
-        print(f"[WARN] pandas-ta unavailable, continue with core features only: {e}")
-
-    return out
-
-
 def build_dataset(
     df: pd.DataFrame,
     horizon: int,
@@ -146,12 +30,7 @@ def build_dataset(
     end_date: str | None,
     target_threshold: float,
 ) -> Dataset:
-    out = df.copy()
-    if start_date:
-        out = out[out["open_time"] >= pd.Timestamp(start_date, tz="UTC")]
-    if end_date:
-        out = out[out["open_time"] <= pd.Timestamp(end_date, tz="UTC")]
-
+    out = apply_date_filter(df.copy(), start_date, end_date)
     out = add_features(out)
     out["future_ret"] = out["close"].shift(-horizon) / out["close"] - 1
     out["target"] = (out["future_ret"] > target_threshold).astype(int)

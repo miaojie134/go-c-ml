@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import math
 import os
-from typing import Any
 
-import numpy as np
-import pandas as pd
 import lightgbm as lgb
+import pandas as pd
 
-from train_lightgbm import add_features, load_kline_zip_files
+from ml_common import (
+    add_features,
+    apply_date_filter,
+    collect_trade_stats,
+    interval_to_minutes,
+    load_kline_zip_files,
+    simulate_strategy,
+    summarize_strategy,
+)
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Backtest LightGBM model on Binance kline data")
-    p.add_argument("--data-root", required=True, help="path to binance-public-data/python/data")
+    p.add_argument("--data-root", required=True, help="path to binance data root")
     p.add_argument("--model-path", required=True, help="path to lightgbm txt model")
     p.add_argument("--symbol", default="ETHUSDT")
     p.add_argument("--interval", default="15m")
@@ -38,87 +43,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def interval_to_minutes(interval: str) -> int:
-    if interval.endswith("m"):
-        return int(interval[:-1])
-    if interval.endswith("h"):
-        return int(interval[:-1]) * 60
-    if interval.endswith("d"):
-        return int(interval[:-1]) * 60 * 24
-    raise ValueError(f"unsupported interval for annualization: {interval}")
-
-
-def max_drawdown(equity: pd.Series) -> float:
-    roll_max = equity.cummax()
-    dd = equity / roll_max - 1.0
-    return float(dd.min())
-
-
-def make_position(proba: np.ndarray, buy_th: float, sell_th: float) -> np.ndarray:
-    pos = np.zeros_like(proba, dtype=np.int8)
-    state = 0
-    for i, p in enumerate(proba):
-        if state == 0 and p >= buy_th:
-            state = 1
-        elif state == 1 and p <= sell_th:
-            state = 0
-        pos[i] = state
-    return pos
-
-
-def make_position_long_short(proba: np.ndarray, long_th: float, short_th: float) -> np.ndarray:
-    pos = np.zeros_like(proba, dtype=np.int8)
-    for i, p in enumerate(proba):
-        if p >= long_th:
-            pos[i] = 1
-        elif p <= short_th:
-            pos[i] = -1
-        else:
-            pos[i] = 0
-    return pos
-
-
-def collect_trade_stats(df: pd.DataFrame) -> dict[str, Any]:
-    transitions = df["position"].diff().fillna(df["position"]).astype(int)
-    entry_idx = list(df.index[transitions == 1])
-    exit_idx = list(df.index[transitions == -1])
-
-    if not entry_idx:
-        return {
-            "closed_trades": 0,
-            "win_rate": 0.0,
-            "avg_trade_return": 0.0,
-            "median_trade_return": 0.0,
-        }
-
-    if len(exit_idx) < len(entry_idx):
-        exit_idx.append(df.index[-1])
-
-    trade_returns = []
-    for ent, ex in zip(entry_idx, exit_idx):
-        if ex <= ent:
-            continue
-        seg = df.loc[ent:ex]
-        r = float((1.0 + seg["strategy_ret"]).prod() - 1.0)
-        trade_returns.append(r)
-
-    if not trade_returns:
-        return {
-            "closed_trades": 0,
-            "win_rate": 0.0,
-            "avg_trade_return": 0.0,
-            "median_trade_return": 0.0,
-        }
-
-    wins = sum(1 for r in trade_returns if r > 0)
-    return {
-        "closed_trades": int(len(trade_returns)),
-        "win_rate": float(wins / len(trade_returns)),
-        "avg_trade_return": float(np.mean(trade_returns)),
-        "median_trade_return": float(np.median(trade_returns)),
-    }
-
-
 def main() -> None:
     args = parse_args()
     if args.sell_threshold >= args.buy_threshold:
@@ -138,10 +62,7 @@ def main() -> None:
         trading_type=args.trading_type,
         time_period=args.time_period,
     )
-    if args.start_date:
-        raw = raw[raw["open_time"] >= pd.Timestamp(args.start_date, tz="UTC")]
-    if args.end_date:
-        raw = raw[raw["open_time"] <= pd.Timestamp(args.end_date, tz="UTC")]
+    raw = apply_date_filter(raw, args.start_date, args.end_date)
 
     print("[2/4] building features", flush=True)
     feat = add_features(raw)
@@ -159,51 +80,34 @@ def main() -> None:
     print(f"[2/4] rows total={len(feat)}, backtest={len(bt)}, features={len(feature_names)}", flush=True)
 
     print("[3/4] predicting + simulating", flush=True)
-    X = bt[feature_names]
-    proba = booster.predict(X)
-    bt["proba"] = proba
-    if args.position_mode == "long_short":
-        bt["position"] = make_position_long_short(proba, args.buy_threshold, args.sell_threshold)
-    else:
-        bt["position"] = make_position(proba, args.buy_threshold, args.sell_threshold)
-
+    bt["proba"] = booster.predict(bt[feature_names])
     bt["ret_1"] = bt["close"].pct_change().fillna(0.0)
-    bt["position_prev"] = bt["position"].shift(1).fillna(0).astype(int)
-    bt["turnover"] = (bt["position"] - bt["position_prev"]).abs()
     cost_rate = (args.fee_bps + args.slippage_bps) / 10000.0
-    bt["cost"] = bt["turnover"] * cost_rate
-    bt["strategy_ret"] = bt["position_prev"] * bt["ret_1"] - bt["cost"]
-    bt["equity"] = (1.0 + bt["strategy_ret"]).cumprod()
-    bt["benchmark_equity"] = (1.0 + bt["ret_1"]).cumprod()
+    work = simulate_strategy(
+        frame=bt[["open_time", "close", "ret_1", "proba"]],
+        buy_th=args.buy_threshold,
+        sell_th=args.sell_threshold,
+        cost_rate=cost_rate,
+        position_mode=args.position_mode,
+    )
 
     bars_per_year = (60 * 24 * 365) / interval_to_minutes(args.interval)
-    n_bars = len(bt)
-    strat_total = float(bt["equity"].iloc[-1] - 1.0)
-    bench_total = float(bt["benchmark_equity"].iloc[-1] - 1.0)
-    ann_return = float((bt["equity"].iloc[-1]) ** (bars_per_year / n_bars) - 1.0) if n_bars > 0 else 0.0
-    vol = float(bt["strategy_ret"].std(ddof=0) * math.sqrt(bars_per_year))
-    sharpe = float(ann_return / vol) if vol > 0 else 0.0
-
-    trade_stats = collect_trade_stats(bt)
+    stats = summarize_strategy(work, bars_per_year)
+    trade_stats = collect_trade_stats(work)
     summary = {
         "symbol": args.symbol,
         "interval": args.interval,
-        "start_time": str(bt["open_time"].iloc[0]),
-        "end_time": str(bt["open_time"].iloc[-1]),
-        "bars": int(n_bars),
+        "start_time": str(work["open_time"].iloc[0]),
+        "end_time": str(work["open_time"].iloc[-1]),
+        "bars": int(len(work)),
         "buy_threshold": args.buy_threshold,
         "sell_threshold": args.sell_threshold,
         "position_mode": args.position_mode,
         "fee_bps": args.fee_bps,
         "slippage_bps": args.slippage_bps,
-        "trades_turnover_count": int(bt["turnover"].sum()),
-        "exposure_ratio": float(bt["position"].mean()),
-        "strategy_total_return": strat_total,
-        "benchmark_total_return": bench_total,
-        "annualized_return": ann_return,
-        "annualized_volatility": vol,
-        "sharpe": sharpe,
-        "max_drawdown": max_drawdown(bt["equity"]),
+        "trades_turnover_count": int(work["turnover"].sum()),
+        "exposure_ratio": float(work["position"].mean()),
+        **stats,
         **trade_stats,
     }
 
@@ -212,7 +116,7 @@ def main() -> None:
     os.makedirs(os.path.dirname(args.equity_out) or ".", exist_ok=True)
     with open(args.summary_out, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
-    bt[
+    work[
         [
             "open_time",
             "close",

@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 import argparse
 import json
-import math
 import os
 from typing import Any
 
 import lightgbm as lgb
-import numpy as np
 import pandas as pd
 
-from backtest_lightgbm import collect_trade_stats, interval_to_minutes, make_position, max_drawdown
-from train_lightgbm import add_features, load_kline_zip_files
+from ml_common import (
+    add_features,
+    apply_date_filter,
+    collect_trade_stats,
+    frange,
+    interval_to_minutes,
+    load_kline_zip_files,
+    simulate_strategy,
+    summarize_strategy,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,12 +50,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def frange(start: float, stop: float, step: float) -> list[float]:
-    n = int(round((stop - start) / step))
-    values = [start + i * step for i in range(n + 1)]
-    return [round(v, 10) for v in values]
-
-
 def evaluate_combo(
     bt: pd.DataFrame,
     bars_per_year: float,
@@ -57,34 +57,20 @@ def evaluate_combo(
     sell_th: float,
     cost_rate: float,
 ) -> tuple[dict[str, Any], pd.DataFrame]:
-    work = bt.copy()
-    work["position"] = make_position(work["proba"].to_numpy(), buy_th, sell_th)
-    work["position_prev"] = work["position"].shift(1).fillna(0).astype(int)
-    work["turnover"] = (work["position"] - work["position_prev"]).abs()
-    work["cost"] = work["turnover"] * cost_rate
-    work["strategy_ret"] = work["position_prev"] * work["ret_1"] - work["cost"]
-    work["equity"] = (1.0 + work["strategy_ret"]).cumprod()
-    work["benchmark_equity"] = (1.0 + work["ret_1"]).cumprod()
-
-    n_bars = len(work)
-    strat_total = float(work["equity"].iloc[-1] - 1.0)
-    ann_return = float((work["equity"].iloc[-1]) ** (bars_per_year / n_bars) - 1.0) if n_bars > 0 else 0.0
-    vol = float(work["strategy_ret"].std(ddof=0) * math.sqrt(bars_per_year))
-    sharpe = float(ann_return / vol) if vol > 0 else 0.0
-    trade_stats = collect_trade_stats(work)
-
+    work = simulate_strategy(
+        frame=bt,
+        buy_th=buy_th,
+        sell_th=sell_th,
+        cost_rate=cost_rate,
+        position_mode="long_only",
+    )
     row = {
         "buy_threshold": buy_th,
         "sell_threshold": sell_th,
         "trades_turnover_count": int(work["turnover"].sum()),
         "exposure_ratio": float(work["position"].mean()),
-        "strategy_total_return": strat_total,
-        "benchmark_total_return": float(work["benchmark_equity"].iloc[-1] - 1.0),
-        "annualized_return": ann_return,
-        "annualized_volatility": vol,
-        "sharpe": sharpe,
-        "max_drawdown": max_drawdown(work["equity"]),
-        **trade_stats,
+        **summarize_strategy(work, bars_per_year),
+        **collect_trade_stats(work),
     }
     return row, work
 
@@ -108,10 +94,7 @@ def main() -> None:
         trading_type=args.trading_type,
         time_period=args.time_period,
     )
-    if args.start_date:
-        raw = raw[raw["open_time"] >= pd.Timestamp(args.start_date, tz="UTC")]
-    if args.end_date:
-        raw = raw[raw["open_time"] <= pd.Timestamp(args.end_date, tz="UTC")]
+    raw = apply_date_filter(raw, args.start_date, args.end_date)
 
     print("[2/5] building features", flush=True)
     feat = add_features(raw)
@@ -128,6 +111,7 @@ def main() -> None:
         raise RuntimeError("backtest slice is empty")
     bt["ret_1"] = bt["close"].pct_change().fillna(0.0)
     bt["proba"] = booster.predict(bt[feature_names])
+    bt = bt[["open_time", "close", "ret_1", "proba"]]
 
     bars_per_year = (60 * 24 * 365) / interval_to_minutes(args.interval)
     cost_rate = (args.fee_bps + args.slippage_bps) / 10000.0
