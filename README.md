@@ -20,12 +20,6 @@ python -m pip install -r requirements.txt
 ## 2) 一条命令开始训练（推荐）
 
 ```bash
-# Linux / macOS
-./run_ml.sh train ETHUSDT
-
-# Windows (CMD / PowerShell)
-run_ml.cmd train ETHUSDT
-# 或
 py run_ml.py train ETHUSDT
 ```
 
@@ -38,44 +32,33 @@ py run_ml.py train ETHUSDT
 ## 3) 统一入口命令
 
 ```bash
-# Linux / macOS
-./run_ml.sh train SYMBOL [extra args...]
-./run_ml.sh auto SYMBOL [extra args...]
-./run_ml.sh auto-ls SYMBOL [extra args...]
-./run_ml.sh backtest SYMBOL [extra args...]
-./run_ml.sh backtest-best SYMBOL [extra args...]
-./run_ml.sh grid SYMBOL [extra args...]
-
-# Windows
-run_ml.cmd train SYMBOL [extra args...]
-run_ml.cmd auto SYMBOL [extra args...]
-run_ml.cmd auto-ls SYMBOL [extra args...]
-run_ml.cmd backtest SYMBOL [extra args...]
-run_ml.cmd backtest-best SYMBOL [extra args...]
-run_ml.cmd grid SYMBOL [extra args...]
+py run_ml.py train SYMBOL [extra args...]
+py run_ml.py auto SYMBOL [extra args...]
+py run_ml.py auto-ls SYMBOL [extra args...]
+py run_ml.py backtest SYMBOL [extra args...]
+py run_ml.py backtest-best SYMBOL [extra args...]
+py run_ml.py grid SYMBOL [extra args...]
 ```
 
 例子：
 
 ```bash
-./run_ml.sh train BTCUSDT
-./run_ml.sh train SOLUSDT --start-date 2022-01-01 --horizon 3
-./run_ml.sh auto-ls ETHUSDT
-./run_ml.sh backtest ETHUSDT
-./run_ml.sh backtest-best ETHUSDT
-./run_ml.sh grid ETHUSDT
+py run_ml.py train BTCUSDT
+py run_ml.py train SOLUSDT --start-date 2022-01-01 --horizon 3
+py run_ml.py auto-ls ETHUSDT
+py run_ml.py backtest ETHUSDT
+py run_ml.py backtest-best ETHUSDT
+py run_ml.py grid ETHUSDT
 ```
 
 ## 4) 自动准备环境和数据
 
-首次运行 `run_ml.sh` 会自动执行：
+首次运行 `run_ml.py` 会自动执行：
 
 - 缺少 `binance-public-data` 时自动 `git clone`
 - 缺少虚拟环境时自动创建 `venv`
 - 缺少依赖时自动 `pip install -r requirements.txt`
 - 若交易对 K 线数据不存在，自动从 Binance 下载对应 `symbol/interval` 数据
-
-`run_ml.cmd` / `run_ml.py` 在 Windows 下也有同样行为。
 
 如果你传了自定义 `DATA_ROOT`，请确保它以 `/data` 结尾，便于自动下载器写入正确目录。
 

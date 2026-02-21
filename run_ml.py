@@ -226,9 +226,7 @@ def to_prefix(symbol: str) -> str:
 
 def usage() -> str:
     return """Usage:
-  Linux/macOS: ./run_ml.sh <command> SYMBOL [extra args...]
-  Windows:     run_ml.cmd <command> SYMBOL [extra args...]
-  Cross-OS:    python run_ml.py <command> SYMBOL [extra args...]
+  python run_ml.py <command> SYMBOL [extra args...]
 
 Commands:
   train         Train one model
