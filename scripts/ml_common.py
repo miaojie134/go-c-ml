@@ -180,23 +180,35 @@ def make_position_long_short(proba: np.ndarray, long_th: float, short_th: float)
 
 
 def collect_trade_stats(df: pd.DataFrame) -> dict[str, Any]:
-    transitions = df["position"].diff().fillna(df["position"]).astype(int)
-    entry_idx = list(df.index[transitions == 1])
-    exit_idx = list(df.index[transitions == -1])
+    # Count both long and short round-trips. A trade starts when position moves
+    # from 0 -> non-zero and ends when it goes back to 0 or flips sign.
+    positions = df["position"].astype(int).to_numpy()
+    idx = df.index.to_numpy()
+    trade_ranges: list[tuple[Any, Any]] = []
 
-    if not entry_idx:
-        return {
-            "closed_trades": 0,
-            "win_rate": 0.0,
-            "avg_trade_return": 0.0,
-            "median_trade_return": 0.0,
-        }
+    state = 0
+    entry = None
+    for i, pos in enumerate(positions):
+        if state == 0:
+            if pos != 0:
+                state = int(pos)
+                entry = idx[i]
+            continue
 
-    if len(exit_idx) < len(entry_idx):
-        exit_idx.append(df.index[-1])
+        if pos == 0 or int(pos) != state:
+            trade_ranges.append((entry, idx[i]))
+            if pos == 0:
+                state = 0
+                entry = None
+            else:
+                state = int(pos)
+                entry = idx[i]
+
+    if state != 0 and entry is not None:
+        trade_ranges.append((entry, idx[-1]))
 
     trade_returns = []
-    for ent, ex in zip(entry_idx, exit_idx):
+    for ent, ex in trade_ranges:
         if ex <= ent:
             continue
         seg = df.loc[ent:ex]

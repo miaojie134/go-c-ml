@@ -23,12 +23,12 @@ BINANCE_DATA_BASE_URL = "https://data.binance.vision/data/futures"
 
 
 def _venv_python_path(venv_dir: Path) -> Path:
-    return venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return venv_dir / "bin/python"
 
 
 def _looks_like_venv_python(python_bin: Path) -> bool:
     parts = [p.lower() for p in python_bin.parts]
-    return "scripts" in parts or "bin" in parts
+    return "bin" in parts
 
 
 def _running_in_venv() -> bool:
@@ -125,20 +125,19 @@ def ensure_runtime() -> None:
     ensure_deps()
 
 
+def ensure_supported_platform() -> None:
+    if os.name == "nt":
+        raise SystemExit("native Windows is not supported. please run in WSL2/Linux")
+
+
 def shutil_which(binary: str) -> str | None:
     path = os.environ.get("PATH", "")
     if not path:
         return None
-    exts = [""]
-    if os.name == "nt":
-        pathext = os.environ.get("PATHEXT", ".EXE;.BAT;.CMD")
-        exts = pathext.split(";")
     for p in path.split(os.pathsep):
         base = Path(p) / binary
-        for ext in exts:
-            cand = Path(str(base) + ext)
-            if cand.is_file():
-                return str(cand)
+        if base.is_file():
+            return str(base)
     return None
 
 
@@ -806,6 +805,8 @@ def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(usage())
         return 0
+
+    ensure_supported_platform()
 
     cmd = argv[0]
     args = argv[1:]

@@ -18,7 +18,26 @@
 - `scripts/backtest_lightgbm.py`：单模型回测
 - `scripts/grid_search_backtest.py`：阈值网格回测
 
-## 1) 安装依赖
+## 1) 环境要求（必读）
+
+本项目仅支持 Linux 环境运行（包含 WSL2 Ubuntu）。
+
+注意：
+
+- Python 必须是 64 位（32 位 Python 会导致 LightGBM GPU/CUDA 编译失败）
+- 不支持 Windows 原生运行，请使用 WSL2/Linux
+
+快速检查：
+
+```bash
+# 检查 Python 位数（应输出 64）
+python -c "import struct; print(struct.calcsize('P')*8)"
+
+# Linux/WSL 检查 GPU 可见性
+nvidia-smi
+```
+
+基础依赖安装：
 
 ```bash
 python -m pip install -U pip
@@ -30,11 +49,8 @@ python -m pip install -r requirements.txt
 先准备配置文件（一次）：
 
 ```bash
-# Linux / macOS
+# Linux / WSL
 cp run_ml.config.example.json run_ml.config.json
-
-# Windows
-copy run_ml.config.example.json run_ml.config.json
 ```
 
 然后直接跑（自动读取 `run_ml.config.json`）：
@@ -94,8 +110,6 @@ python run_ml.py backtest
 - 若交易对 K 线数据不存在，自动从 Binance 下载对应 `symbol/interval` 数据到 `./data`
 - 下载会显示进度：总文件数、当前文件、百分比、下载状态
 
-Windows 建议在已激活虚拟环境后使用 `python run_ml.py ...`，不要用 `py run_ml.py ...`（`py` 可能跳过当前 venv）。
-
 如果你传了自定义 `DATA_ROOT`，脚本会把数据下载到该目录下的标准结构中。
 
 常用配置项（写在 `run_ml.config.json`）：
@@ -140,16 +154,34 @@ python scripts/train_lightgbm.py \
   --target-threshold 0.0
 ```
 
-## 7) GPU 训练
+## 7) GPU / CUDA 训练
 
-当前默认 `--device-type` 已是 `cuda`。如果你要手动覆盖，可在训练命令后加：
+默认配置 `run_ml.config.json` 使用 `device-type=cuda`，直接运行：
 
 ```bash
---device-type gpu --gpu-platform-id 0 --gpu-device-id 0 --gpu-use-dp 0
+python run_ml.py auto-ls ETHUSDT
+python run_ml.py backtest-best ETHUSDT
 ```
 
-如果你是 NVIDIA + CUDA 版 LightGBM，可把 `--device-type gpu` 改成 `--device-type cuda`。
-脚本会在 GPU 不可用时自动回退到 CPU，并打印 warning。
+如果你需要在 WSL2/Linux 编译 CUDA 版 LightGBM，建议固定 GCC-12：
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake libboost-dev libboost-filesystem-dev libboost-system-dev gcc-12 g++-12
+export CC=/usr/bin/gcc-12
+export CXX=/usr/bin/g++-12
+export CUDAHOSTCXX=/usr/bin/g++-12
+export CMAKE_ARGS="-DUSE_CUDA=ON -DCMAKE_CUDA_HOST_COMPILER=/usr/bin/g++-12"
+python -m pip uninstall -y lightgbm
+python -m pip install --no-cache-dir --no-binary lightgbm lightgbm -v
+```
+
+### 7.1 常见报错速查
+
+- `CUDA Tree Learner was not enabled ... -DUSE_CUDA=1`
+  - 你在用 `device-type=cuda`，但 LightGBM 不是 CUDA 编译版。
+- `unsupported GNU version! gcc versions later than 12 are not supported`
+  - 在 WSL/Linux 使用 GCC-12 + G++-12（见上面的环境变量）。
 
 ## 8) 常用参数
 
