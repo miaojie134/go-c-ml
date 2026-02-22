@@ -41,11 +41,13 @@ def build_dataset(
         "future_ret",
         "target",
         "ignore",
+        "tb_label",
     }
+    noisy_cols = {"open", "high", "low", "close", "close_time", "open_time"}
     feature_names = [
         c
         for c in out.columns
-        if c not in reserved_cols and pd.api.types.is_numeric_dtype(out[c])
+        if c not in reserved_cols and c not in noisy_cols and pd.api.types.is_numeric_dtype(out[c])
     ]
     out = out.dropna(subset=feature_names + ["target"]).copy()
     if out.empty:
@@ -106,9 +108,19 @@ def train_and_evaluate(
         n_jobs=-1,
     )
     try:
+        # Sample weights: emphasize high-magnitude return rows
+        sw = np.abs(ds.y_train.to_numpy())
+        sw_mean = sw.mean()
+        if sw_mean > 0:
+            sw = sw / sw_mean
+            sw = np.clip(sw, 0.2, 5.0)
+        else:
+            sw = np.ones(len(ds.y_train))
+
         model.fit(
             ds.X_train,
             ds.y_train,
+            sample_weight=sw,
             eval_set=[(ds.X_test, ds.y_test)],
             eval_metric="l2",
             callbacks=[early_stopping(stopping_rounds=80), log_evaluation(100)],

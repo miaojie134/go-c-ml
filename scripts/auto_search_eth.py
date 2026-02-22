@@ -86,8 +86,11 @@ def build_labeled_frame(feat_base: pd.DataFrame, horizon: int, target_threshold:
     df["future_ret"] = df["close"].shift(-horizon) / df["close"] - 1.0
     df["target"] = df["future_ret"]
 
-    reserved_cols = {"open_time", "close_time", "future_ret", "target", "ignore"}
+    reserved_cols = {"open_time", "close_time", "future_ret", "target", "ignore", "tb_label"}
     feature_names = [c for c in df.columns if c not in reserved_cols and pd.api.types.is_numeric_dtype(df[c])]
+    # Remove raw price columns that leak non-stationary info
+    noisy_cols = {"open", "high", "low", "close", "close_time", "open_time"}
+    feature_names = [c for c in feature_names if c not in noisy_cols]
     df = df.dropna(subset=feature_names + ["target"]).copy().reset_index(drop=True)
     return df, feature_names
 
@@ -287,9 +290,19 @@ def main() -> None:
                 n_jobs=-1,
             )
             try:
+                # Sample weights: emphasize high-magnitude return rows
+                sw_train = np.abs(y_train.to_numpy())
+                sw_mean = sw_train.mean()
+                if sw_mean > 0:
+                    sw_train = sw_train / sw_mean
+                    sw_train = np.clip(sw_train, 0.2, 5.0)
+                else:
+                    sw_train = np.ones(len(y_train))
+
                 model.fit(
                     X_train,
                     y_train,
+                    sample_weight=sw_train,
                     eval_set=[(X_val, y_val)],
                     eval_metric="l2",
                     callbacks=[early_stopping(stopping_rounds=args.early_stop_rounds, verbose=False)],
@@ -314,10 +327,52 @@ def main() -> None:
                 model.fit(
                     X_train,
                     y_train,
+                    sample_weight=sw_train,
                     eval_set=[(X_val, y_val)],
                     eval_metric="l2",
                     callbacks=[early_stopping(stopping_rounds=args.early_stop_rounds, verbose=False)],
                 )
+
+            # --- Feature pruning: drop bottom 30% by gain importance, retrain ---
+            importances = model.booster_.feature_importance(importance_type="gain")
+            threshold = np.percentile(importances, 30)
+            keep_mask = importances > threshold
+            if keep_mask.sum() >= 5:  # only prune if enough features remain
+                pruned_features = [f for f, k in zip(feature_names, keep_mask) if k]
+                X_train_p = X_train[pruned_features]
+                X_val_p = X_val[pruned_features]
+                X_test = test_df[pruned_features]
+
+                model2 = LGBMRegressor(
+                    objective="regression",
+                    n_estimators=args.n_estimators,
+                    learning_rate=lr,
+                    num_leaves=leaves,
+                    subsample=args.subsample,
+                    colsample_bytree=args.colsample_bytree,
+                    reg_alpha=args.reg_alpha,
+                    reg_lambda=args.reg_lambda,
+                    device_type=args.device_type if args.device_type != "cuda" or True else "cpu",
+                    gpu_platform_id=args.gpu_platform_id,
+                    gpu_device_id=args.gpu_device_id,
+                    gpu_use_dp=gpu_use_dp_flag,
+                    verbosity=-1,
+                    random_state=args.random_state,
+                    n_jobs=-1,
+                )
+                try:
+                    model2.fit(
+                        X_train_p,
+                        y_train,
+                        sample_weight=sw_train,
+                        eval_set=[(X_val_p, y_val)],
+                        eval_metric="l2",
+                        callbacks=[early_stopping(stopping_rounds=args.early_stop_rounds, verbose=False)],
+                    )
+                    model = model2
+                    X_val = X_val_p
+                except Exception:
+                    pass  # if pruned retrain fails, keep original model
 
             v_bt = val_df[["open_time", "close"]].copy()
             v_bt["ret_1"] = v_bt["close"].pct_change().fillna(0.0)

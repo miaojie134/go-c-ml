@@ -91,10 +91,19 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     out["ret_2"] = out["close"].pct_change(2)
     out["ret_4"] = out["close"].pct_change(4)
     out["ret_8"] = out["close"].pct_change(8)
+    out["ret_16"] = out["close"].pct_change(16)
+    out["ret_32"] = out["close"].pct_change(32)
     out["range_hl"] = (out["high"] - out["low"]) / out["close"]
     out["range_oc"] = (out["close"] - out["open"]) / out["open"]
     out["volume_chg_1"] = out["volume"].pct_change(1)
     out["trade_count_chg_1"] = out["number_of_trades"].pct_change(1)
+
+    # --- Microstructure features from existing kline fields ---
+    out["taker_buy_ratio"] = out["taker_buy_base_asset_volume"] / (out["volume"] + 1e-8)
+    out["taker_buy_ratio_chg"] = out["taker_buy_ratio"].pct_change(1)
+    out["avg_trade_size"] = out["volume"] / (out["number_of_trades"] + 1e-8)
+    out["avg_trade_size_chg"] = out["avg_trade_size"].pct_change(1)
+    out["quote_volume_ratio"] = out["quote_asset_volume"] / (out["volume"] + 1e-8)
 
     for window in (5, 10, 20, 48, 96):
         out[f"volatility_{window}"] = out["ret_1"].rolling(window).std()
@@ -108,6 +117,11 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
         roll_vol_mean = out["volume"].rolling(window).mean()
         roll_vol_std = out["volume"].rolling(window).std()
         out[f"zscore_volume_{window}"] = (out["volume"] - roll_vol_mean) / (roll_vol_std + 1e-8)
+
+        # Taker buy ratio z-score
+        tbr_mean = out["taker_buy_ratio"].rolling(window).mean()
+        tbr_std = out["taker_buy_ratio"].rolling(window).std()
+        out[f"zscore_taker_buy_{window}"] = (out["taker_buy_ratio"] - tbr_mean) / (tbr_std + 1e-8)
 
     try:
         import pandas_ta as ta
@@ -139,7 +153,90 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
     except Exception as exc:
         print(f"[WARN] pandas-ta unavailable, continue with core features only: {exc}")
 
+    # --- Multi-timeframe features (1h and 4h aggregated into 15m) ---
+    out = _add_multi_timeframe_features(out)
+
     return out
+
+
+def _add_multi_timeframe_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Resample 15m data to 1h and 4h, compute features, merge back."""
+    out = df.copy()
+    if "open_time" not in out.columns:
+        return out
+
+    # Ensure open_time is datetime for resampling
+    ot = pd.to_datetime(out["open_time"], utc=True)
+    out = out.set_index(ot)
+
+    for tf_label, rule in [("1h", "1h"), ("4h", "4h")]:
+        agg = out.resample(rule).agg(
+            {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+        ).dropna()
+
+        agg[f"ret_1_{tf_label}"] = agg["close"].pct_change(1)
+        agg[f"ret_4_{tf_label}"] = agg["close"].pct_change(4)
+        agg[f"range_hl_{tf_label}"] = (agg["high"] - agg["low"]) / (agg["close"] + 1e-8)
+        agg[f"vol_ma_ratio_{tf_label}"] = agg["volume"] / agg["volume"].rolling(20).mean() - 1
+        agg[f"volatility_{tf_label}"] = agg[f"ret_1_{tf_label}"].rolling(20).std()
+        agg[f"price_ma_ratio_{tf_label}"] = agg["close"] / agg["close"].rolling(20).mean() - 1
+
+        merge_cols = [c for c in agg.columns if tf_label in c]
+        agg_merge = agg[merge_cols]
+
+        out = out.join(agg_merge, how="left")
+        for col in merge_cols:
+            out[col] = out[col].ffill()
+
+    out = out.reset_index(drop=True)
+    # Restore original open_time column
+    out["open_time"] = df["open_time"].values[: len(out)]
+
+    return out
+
+
+def triple_barrier_label(
+    df: pd.DataFrame,
+    tp_mult: float = 2.0,
+    sl_mult: float = 1.0,
+    max_holding: int = 16,
+    atr_col: str = "atr_14",
+) -> pd.Series:
+    """
+    Triple Barrier labeling: for each bar, scan forward to determine
+    if price hits take-profit (+1), stop-loss (-1), or times out (0).
+    TP/SL are multiples of ATR for dynamic sizing.
+    """
+    close = df["close"].to_numpy()
+    high = df["high"].to_numpy()
+    low = df["low"].to_numpy()
+    atr = df[atr_col].to_numpy() if atr_col in df.columns else np.full(len(df), np.nan)
+    n = len(df)
+    labels = np.full(n, np.nan)
+
+    for i in range(n):
+        if np.isnan(atr[i]) or atr[i] <= 0:
+            continue
+        entry = close[i]
+        tp_price = entry + tp_mult * atr[i]
+        sl_price = entry - sl_mult * atr[i]
+        label = 0  # timeout
+        for j in range(i + 1, min(i + max_holding + 1, n)):
+            if high[j] >= tp_price:
+                label = 1
+                break
+            if low[j] <= sl_price:
+                label = -1
+                break
+        labels[i] = label
+
+    return pd.Series(labels, index=df.index, name="tb_label")
 
 
 def frange(start: float, stop: float, step: float) -> list[float]:
@@ -245,15 +342,36 @@ def simulate_strategy(
     sell_th: float,
     cost_rate: float,
     position_mode: str,
+    vol_target: float = 0.0,
+    vol_lookback: int = 20,
 ) -> pd.DataFrame:
+    """Simulate a trading strategy with optional volatility targeting.
+    
+    If vol_target > 0, positions are scaled by (vol_target / realized_vol)
+    to normalize strategy volatility, improving Sharpe and reducing drawdown.
+    vol_target is in annualized terms (e.g., 0.10 = 10% annualized vol target).
+    """
     work = frame.copy()
     if position_mode == "long_short":
-        work["position"] = make_position_long_short(work["proba"].to_numpy(), buy_th, sell_th)
+        raw_pos = make_position_long_short(work["proba"].to_numpy(), buy_th, sell_th).astype(float)
     elif position_mode == "long_only":
-        work["position"] = make_position(work["proba"].to_numpy(), buy_th, sell_th)
+        raw_pos = make_position(work["proba"].to_numpy(), buy_th, sell_th).astype(float)
     else:
         raise ValueError(f"unsupported position_mode: {position_mode}")
-    work["position_prev"] = work["position"].shift(1).fillna(0).astype(int)
+
+    if vol_target > 0 and "ret_1" in work.columns:
+        # Convert annualized vol target to per-bar vol target
+        # Assume 15m bars: ~35040 bars/year, sqrt(35040) ≈ 187
+        bars_per_year_approx = 35040.0
+        per_bar_vol_target = vol_target / math.sqrt(bars_per_year_approx)
+        realized_vol = work["ret_1"].rolling(vol_lookback).std().fillna(per_bar_vol_target)
+        vol_scalar = per_bar_vol_target / (realized_vol + 1e-8)
+        vol_scalar = vol_scalar.clip(0.1, 3.0)  # cap leverage between 0.1x and 3x
+        work["position"] = (raw_pos * vol_scalar.to_numpy()).clip(-1.0, 1.0)
+    else:
+        work["position"] = raw_pos
+
+    work["position_prev"] = work["position"].shift(1).fillna(0.0)
     work["turnover"] = (work["position"] - work["position_prev"]).abs()
     work["cost"] = work["turnover"] * cost_rate
     work["strategy_ret"] = work["position_prev"] * work["ret_1"] - work["cost"]
