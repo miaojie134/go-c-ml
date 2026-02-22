@@ -436,8 +436,6 @@ def ensure_kline_data(
     end_date: str,
 ) -> None:
     symbol_upper = symbol.upper()
-    if has_kline_data(symbol_upper, interval, trading_type, time_period):
-        return
 
     start_day = _parse_iso_date("start-date", start_date)
     end_day = _parse_iso_date("end-date", end_date) if end_date else datetime.now(timezone.utc).date()
@@ -469,23 +467,29 @@ def ensure_kline_data(
     if total == 0:
         raise SystemExit("download plan is empty, please check start-date/end-date")
 
+    existing_in_range = sum(1 for _, target_path, _ in download_plan if target_path.is_file())
+    if existing_in_range == total:
+        print(f"[setup] data already complete for requested range: {existing_in_range}/{total}", flush=True)
+        return
+
+    missing_plan = [(u, p, l) for (u, p, l) in download_plan if not p.is_file()]
+    missing_total = len(missing_plan)
+
     downloaded = 0
-    exists = 0
+    exists = existing_in_range
     not_found = 0
     print(
         f"[setup] data not found, downloading klines from Binance: symbol={symbol_upper} interval={interval} type={trading_type} period={time_period}",
         flush=True,
     )
-    print(f"[setup] download plan: {total} files", flush=True)
-    for i, (url, target_path, label) in enumerate(download_plan, start=1):
+    print(f"[setup] download plan: total={total}, existing={existing_in_range}, missing={missing_total}", flush=True)
+    for i, (url, target_path, label) in enumerate(missing_plan, start=1):
         status = _download_to_file(url, target_path)
         if status == "downloaded":
             downloaded += 1
-        elif status == "exists":
-            exists += 1
         else:
             not_found += 1
-        _render_progress("download", i, total, status, label)
+        _render_progress("download", i, missing_total, status, label)
 
     print(
         f"[setup] download summary: downloaded={downloaded}, existing={exists}, not_found={not_found}",
