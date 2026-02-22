@@ -8,7 +8,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from lightgbm import LGBMClassifier, early_stopping
+from lightgbm import LGBMRegressor, early_stopping
+from sklearn.metrics import mean_squared_error, r2_score
 
 from ml_common import (
     add_features,
@@ -83,7 +84,7 @@ def parse_list(value: str, cast):
 def build_labeled_frame(feat_base: pd.DataFrame, horizon: int, target_threshold: float) -> tuple[pd.DataFrame, list[str]]:
     df = feat_base.copy()
     df["future_ret"] = df["close"].shift(-horizon) / df["close"] - 1.0
-    df["target"] = (df["future_ret"] > target_threshold).astype(int)
+    df["target"] = df["future_ret"]
 
     reserved_cols = {"open_time", "close_time", "future_ret", "target", "ignore"}
     feature_names = [c for c in df.columns if c not in reserved_cols and pd.api.types.is_numeric_dtype(df[c])]
@@ -91,28 +92,32 @@ def build_labeled_frame(feat_base: pd.DataFrame, horizon: int, target_threshold:
     return df, feature_names
 
 
-def split_df(df: pd.DataFrame, train_ratio: float, val_ratio: float):
-    n = len(df)
-    i_train = int(n * train_ratio)
-    i_val = int(n * val_ratio)
-    if not (0 < i_train < i_val < n):
-        raise ValueError(f"invalid split indices: {i_train}, {i_val}, n={n}")
-    return df.iloc[:i_train].copy(), df.iloc[i_train:i_val].copy(), df.iloc[i_val:].copy()
+def generate_walk_forward_splits(df: pd.DataFrame, n_splits: int = 3, val_fraction: float = 0.15):
+    folds = []
+    min_train_idx = int(len(df) * 0.4)
+    remaining_len = len(df) - min_train_idx
+    step = int(remaining_len / n_splits)
+    
+    for i in range(n_splits):
+        test_start = min_train_idx + i * step
+        test_end = test_start + step if i < n_splits - 1 else len(df)
+        
+        val_start = int(test_start * (1 - val_fraction))
+        
+        train_df = df.iloc[:val_start].copy()
+        val_df = df.iloc[val_start:test_start].copy()
+        test_df = df.iloc[test_start:test_end].copy()
+        folds.append((train_df, val_df, test_df))
+    return folds
 
 
-def summarize_classification(y_true: pd.Series, proba: np.ndarray) -> dict[str, float]:
-    pred = (proba >= 0.5).astype(int)
-    tp = int(((pred == 1) & (y_true == 1)).sum())
-    fp = int(((pred == 1) & (y_true == 0)).sum())
-    fn = int(((pred == 0) & (y_true == 1)).sum())
-    tn = int(((pred == 0) & (y_true == 0)).sum())
-    precision = tp / (tp + fp) if (tp + fp) else 0.0
-    recall = tp / (tp + fn) if (tp + fn) else 0.0
-    acc = (tp + tn) / len(y_true) if len(y_true) else 0.0
+def summarize_regression(y_true: list[float], proba: list[float]) -> dict[str, float]:
+    y_true_arr = np.array(y_true)
+    proba_arr = np.array(proba)
     return {
-        "clf_accuracy": float(acc),
-        "clf_precision": float(precision),
-        "clf_recall": float(recall),
+        "rmse": float(np.sqrt(mean_squared_error(y_true_arr, proba_arr))) if len(y_true) else 0.0,
+        "r2": float(r2_score(y_true_arr, proba_arr)) if len(y_true) else 0.0,
+        "correlation": float(np.corrcoef(y_true_arr, proba_arr)[0, 1]) if len(y_true) and np.std(proba_arr) > 0 else 0.0,
     }
 
 
@@ -243,50 +248,29 @@ def main() -> None:
         if len(df) < 3000:
             continue
 
-        train_df, val_df, test_df = split_df(df, args.train_ratio, args.val_ratio)
-        X_train = train_df[feature_names]
-        y_train = train_df["target"].astype(int)
-        X_val = val_df[feature_names]
-        y_val = val_df["target"].astype(int)
-        X_test = test_df[feature_names]
-        y_test = test_df["target"].astype(int)
-        if y_train.nunique() < 2 or y_val.nunique() < 2 or y_test.nunique() < 2:
-            continue
+        folds = generate_walk_forward_splits(df, n_splits=3, val_fraction=0.15)
+        
+        valid_folds = True
+        val_dfs = []
+        test_dfs = []
+        model = None
+        y_test_all = []
+        pred_all = []
+        
+        for train_df, val_df, test_df in folds:
+            X_train = train_df[feature_names]
+            y_train = train_df["target"]
+            X_val = val_df[feature_names]
+            y_val = val_df["target"]
+            X_test = test_df[feature_names]
+            y_test = test_df["target"]
+            
+            if y_train.nunique() <= 1 or y_val.nunique() <= 1 or y_test.nunique() <= 1:
+                valid_folds = False
+                break
 
-        model = LGBMClassifier(
-            objective="binary",
-            n_estimators=args.n_estimators,
-            learning_rate=lr,
-            num_leaves=leaves,
-            subsample=args.subsample,
-            colsample_bytree=args.colsample_bytree,
-            reg_alpha=args.reg_alpha,
-            reg_lambda=args.reg_lambda,
-            device_type=args.device_type,
-            gpu_platform_id=args.gpu_platform_id,
-            gpu_device_id=args.gpu_device_id,
-            gpu_use_dp=gpu_use_dp_flag,
-            verbosity=-1,
-            random_state=args.random_state,
-            n_jobs=-1,
-        )
-        try:
-            model.fit(
-                X_train,
-                y_train,
-                eval_set=[(X_val, y_val)],
-                eval_metric="auc",
-                callbacks=[early_stopping(stopping_rounds=args.early_stop_rounds, verbose=False)],
-            )
-        except Exception as exc:
-            if args.device_type == "cpu":
-                raise
-            print(
-                f"[WARN] {args.symbol} config {idx}: device_type={args.device_type} failed ({exc}), fallback to cpu",
-                flush=True,
-            )
-            model = LGBMClassifier(
-                objective="binary",
+            model = LGBMRegressor(
+                objective="regression",
                 n_estimators=args.n_estimators,
                 learning_rate=lr,
                 num_leaves=leaves,
@@ -294,22 +278,63 @@ def main() -> None:
                 colsample_bytree=args.colsample_bytree,
                 reg_alpha=args.reg_alpha,
                 reg_lambda=args.reg_lambda,
-                device_type="cpu",
+                device_type=args.device_type,
+                gpu_platform_id=args.gpu_platform_id,
+                gpu_device_id=args.gpu_device_id,
+                gpu_use_dp=gpu_use_dp_flag,
                 verbosity=-1,
                 random_state=args.random_state,
                 n_jobs=-1,
             )
-            model.fit(
-                X_train,
-                y_train,
-                eval_set=[(X_val, y_val)],
-                eval_metric="auc",
-                callbacks=[early_stopping(stopping_rounds=args.early_stop_rounds, verbose=False)],
-            )
+            try:
+                model.fit(
+                    X_train,
+                    y_train,
+                    eval_set=[(X_val, y_val)],
+                    eval_metric="l2",
+                    callbacks=[early_stopping(stopping_rounds=args.early_stop_rounds, verbose=False)],
+                )
+            except Exception as exc:
+                if args.device_type == "cpu":
+                    raise
+                model = LGBMRegressor(
+                    objective="regression",
+                    n_estimators=args.n_estimators,
+                    learning_rate=lr,
+                    num_leaves=leaves,
+                    subsample=args.subsample,
+                    colsample_bytree=args.colsample_bytree,
+                    reg_alpha=args.reg_alpha,
+                    reg_lambda=args.reg_lambda,
+                    device_type="cpu",
+                    verbosity=-1,
+                    random_state=args.random_state,
+                    n_jobs=-1,
+                )
+                model.fit(
+                    X_train,
+                    y_train,
+                    eval_set=[(X_val, y_val)],
+                    eval_metric="l2",
+                    callbacks=[early_stopping(stopping_rounds=args.early_stop_rounds, verbose=False)],
+                )
 
-        val_bt = val_df[["open_time", "close"]].copy()
-        val_bt["ret_1"] = val_bt["close"].pct_change().fillna(0.0)
-        val_bt["proba"] = model.predict_proba(X_val)[:, 1]
+            v_bt = val_df[["open_time", "close"]].copy()
+            v_bt["ret_1"] = v_bt["close"].pct_change().fillna(0.0)
+            v_bt["proba"] = model.predict(X_val)
+            val_dfs.append(v_bt)
+
+            t_bt = test_df[["open_time", "close"]].copy()
+            t_bt["ret_1"] = t_bt["close"].pct_change().fillna(0.0)
+            t_bt["proba"] = model.predict(X_test)
+            test_dfs.append(t_bt)
+            y_test_all.extend(y_test.tolist())
+            pred_all.extend(t_bt["proba"].tolist())
+
+        if not valid_folds:
+            continue
+
+        val_bt = pd.concat(val_dfs, ignore_index=True)
         val_best, _ = evaluate_thresholds(
             frame=val_bt,
             buy_grid=buy_grid,
@@ -326,9 +351,7 @@ def main() -> None:
             position_mode=args.position_mode,
         )
 
-        test_bt = test_df[["open_time", "close"]].copy()
-        test_bt["ret_1"] = test_bt["close"].pct_change().fillna(0.0)
-        test_bt["proba"] = model.predict_proba(X_test)[:, 1]
+        test_bt = pd.concat(test_dfs, ignore_index=True)
 
         buy_th = float(val_best["buy_threshold"])
         sell_th = float(val_best["sell_threshold"])
@@ -344,7 +367,7 @@ def main() -> None:
         stats = summarize_strategy(work, bars_per_year)
         trade_stats = collect_trade_stats(work)
         trades_per_day = float(trade_stats["closed_trades"] / days) if days > 0 else 0.0
-        clf_stats = summarize_classification(y_test, test_bt["proba"].to_numpy())
+        clf_stats = summarize_regression(y_test_all, pred_all)
         constraint_passed = (
             trade_stats["closed_trades"] >= args.min_trades
             and trades_per_day >= args.min_trades_per_day

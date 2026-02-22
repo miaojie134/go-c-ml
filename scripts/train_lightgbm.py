@@ -6,8 +6,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from lightgbm import LGBMClassifier, early_stopping, log_evaluation
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+from lightgbm import LGBMRegressor, early_stopping, log_evaluation
+from sklearn.metrics import mean_squared_error, r2_score
 
 from ml_common import add_features, apply_date_filter, load_kline_zip_files
 
@@ -33,7 +33,7 @@ def build_dataset(
     out = apply_date_filter(df.copy(), start_date, end_date)
     out = add_features(out)
     out["future_ret"] = out["close"].shift(-horizon) / out["close"] - 1
-    out["target"] = (out["future_ret"] > target_threshold).astype(int)
+    out["target"] = out["future_ret"]
 
     reserved_cols = {
         "open_time",
@@ -59,14 +59,15 @@ def build_dataset(
     test = out.iloc[split:]
 
     X_train = train[feature_names]
-    y_train = train["target"].astype(int)
+    y_train = train["target"]
     X_test = test[feature_names]
-    y_test = test["target"].astype(int)
+    y_test = test["target"]
 
-    if y_train.nunique() < 2:
-        raise RuntimeError("train set has only one class, adjust date range or target_threshold")
-    if y_test.nunique() < 2:
-        raise RuntimeError("test set has only one class, adjust date range or target_threshold")
+    # For regression, we just need variance in target
+    if y_train.nunique() <= 1:
+        raise RuntimeError("train set target has no variance")
+    if y_test.nunique() <= 1:
+        raise RuntimeError("test set target has no variance")
 
     return Dataset(
         X_train=X_train,
@@ -85,11 +86,11 @@ def train_and_evaluate(
     gpu_platform_id: int,
     gpu_device_id: int,
     gpu_use_dp: int,
-) -> tuple[LGBMClassifier, dict]:
+) -> tuple[LGBMRegressor, dict]:
     # LightGBM expects bool-like value for gpu_use_dp on newer versions.
     gpu_use_dp_flag = bool(gpu_use_dp)
-    model = LGBMClassifier(
-        objective="binary",
+    model = LGBMRegressor(
+        objective="regression",
         n_estimators=1000,
         learning_rate=0.03,
         num_leaves=63,
@@ -109,15 +110,15 @@ def train_and_evaluate(
             ds.X_train,
             ds.y_train,
             eval_set=[(ds.X_test, ds.y_test)],
-            eval_metric="auc",
+            eval_metric="l2",
             callbacks=[early_stopping(stopping_rounds=80), log_evaluation(100)],
         )
     except Exception as e:
         if device_type == "cpu":
             raise
         print(f"[WARN] device_type={device_type} failed ({e}), fallback to cpu", flush=True)
-        model = LGBMClassifier(
-            objective="binary",
+        model = LGBMRegressor(
+            objective="regression",
             n_estimators=1000,
             learning_rate=0.03,
             num_leaves=63,
@@ -133,19 +134,16 @@ def train_and_evaluate(
             ds.X_train,
             ds.y_train,
             eval_set=[(ds.X_test, ds.y_test)],
-            eval_metric="auc",
+            eval_metric="l2",
             callbacks=[early_stopping(stopping_rounds=80), log_evaluation(100)],
         )
 
-    prob = model.predict_proba(ds.X_test)[:, 1]
-    pred = (prob >= 0.5).astype(int)
+    prob = model.predict(ds.X_test)
 
     metrics = {
-        "accuracy": float(accuracy_score(ds.y_test, pred)),
-        "precision": float(precision_score(ds.y_test, pred, zero_division=0)),
-        "recall": float(recall_score(ds.y_test, pred, zero_division=0)),
-        "f1": float(f1_score(ds.y_test, pred, zero_division=0)),
-        "auc": float(roc_auc_score(ds.y_test, prob)),
+        "rmse": float(np.sqrt(mean_squared_error(ds.y_test, prob))),
+        "r2": float(r2_score(ds.y_test, prob)),
+        "correlation": float(np.corrcoef(ds.y_test, prob)[0, 1]) if np.std(prob) > 0 else 0.0,
         "train_samples": int(len(ds.X_train)),
         "test_samples": int(len(ds.X_test)),
         "n_features": int(len(ds.feature_names)),
@@ -154,7 +152,7 @@ def train_and_evaluate(
 
 
 def save_outputs(
-    model: LGBMClassifier,
+    model: LGBMRegressor,
     metrics: dict,
     ds: Dataset,
     model_out: str,

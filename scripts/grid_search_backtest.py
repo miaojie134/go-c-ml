@@ -33,12 +33,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fee-bps", type=float, default=5.0)
     p.add_argument("--slippage-bps", type=float, default=1.0)
 
-    p.add_argument("--buy-min", type=float, default=0.52)
-    p.add_argument("--buy-max", type=float, default=0.72)
-    p.add_argument("--buy-step", type=float, default=0.02)
-    p.add_argument("--sell-min", type=float, default=0.30)
-    p.add_argument("--sell-max", type=float, default=0.50)
-    p.add_argument("--sell-step", type=float, default=0.02)
+    p.add_argument("--buy-min", type=float, default=0.0002)
+    p.add_argument("--buy-max", type=float, default=0.002)
+    p.add_argument("--buy-step", type=float, default=0.0005)
+    p.add_argument("--sell-min", type=float, default=-0.002)
+    p.add_argument("--sell-max", type=float, default=-0.0002)
+    p.add_argument("--sell-step", type=float, default=0.0005)
 
     p.add_argument("--min-trades", type=int, default=20)
     p.add_argument("--optimize", default="sharpe", choices=["sharpe", "strategy_total_return", "annualized_return"])

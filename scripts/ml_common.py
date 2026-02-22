@@ -100,6 +100,14 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
         out[f"volatility_{window}"] = out["ret_1"].rolling(window).std()
         out[f"price_ma_ratio_{window}"] = out["close"] / out["close"].rolling(window).mean() - 1
         out[f"volume_ma_ratio_{window}"] = out["volume"] / out["volume"].rolling(window).mean() - 1
+        
+        roll_close_mean = out["close"].rolling(window).mean()
+        roll_close_std = out["close"].rolling(window).std()
+        out[f"zscore_close_{window}"] = (out["close"] - roll_close_mean) / (roll_close_std + 1e-8)
+        
+        roll_vol_mean = out["volume"].rolling(window).mean()
+        roll_vol_std = out["volume"].rolling(window).std()
+        out[f"zscore_volume_{window}"] = (out["volume"] - roll_vol_mean) / (roll_vol_std + 1e-8)
 
     try:
         import pandas_ta as ta
