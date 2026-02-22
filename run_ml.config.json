@@ -115,6 +115,10 @@
       "min-trades": 30,
       "optimize": "sharpe",
       "top-k": 20
+    },
+    "bundle": {
+      "mode": "best-ls",
+      "out": "models/eth_best_ls_bundle.json"
     }
   }
 }

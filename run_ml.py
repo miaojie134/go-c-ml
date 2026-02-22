@@ -177,7 +177,7 @@ def _load_config(config_path: Path | None) -> dict:
 
 
 COMMON_CONFIG_KEYS = {"symbol", "interval", "trading-type", "time-period", "start-date", "end-date"}
-SUPPORTED_COMMANDS = ("data", "train", "auto", "auto-ls", "backtest", "backtest-best", "grid")
+SUPPORTED_COMMANDS = ("data", "train", "auto", "auto-ls", "backtest", "backtest-best", "grid", "bundle")
 REQUIRED_COMMAND_KEYS: dict[str, tuple[str, ...]] = {
     "train": (
         "horizon",
@@ -521,6 +521,7 @@ Commands:
   backtest      Backtest quant model
   backtest-best Backtest best long_short model
   grid          Grid-search thresholds on quant model
+  bundle        Export model bundle json for external projects (e.g. Go)
 
 Config:
   --config <path>    Load settings from JSON config.
@@ -533,6 +534,7 @@ Examples:
   python run_ml.py train ETHUSDT
   python run_ml.py auto-ls ETHUSDT
   python run_ml.py backtest ETHUSDT
+  python run_ml.py bundle ETHUSDT
 """
 
 
@@ -652,6 +654,78 @@ def _load_best_thresholds(prefix: str) -> tuple[float, float, Path] | None:
     return buy_th, sell_th, best_cfg
 
 
+def _load_json_file(path: Path) -> dict:
+    if not path.is_file():
+        raise SystemExit(f"json file not found: {path}")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid json file: {path} ({exc})") from exc
+
+
+def _parse_lightgbm_feature_names(model_path: Path) -> list[str]:
+    if not model_path.is_file():
+        raise SystemExit(f"model file not found: {model_path}")
+    with model_path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            if line.startswith("feature_names="):
+                value = line.split("=", 1)[1].strip()
+                names = [x for x in value.split(" ") if x]
+                if not names:
+                    break
+                return names
+    raise SystemExit(f"cannot parse feature_names from model file: {model_path}")
+
+
+def _float_or_none(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _export_model_bundle(
+    ctx: CommandContext,
+    source_command: str,
+    model_path: Path,
+    bundle_path: Path,
+    strategy: dict,
+    sources: dict[str, str | None] | None = None,
+) -> None:
+    feature_names = _parse_lightgbm_feature_names(model_path)
+    payload = {
+        "schema_version": "go-c-ml.model_bundle.v1",
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "source_command": source_command,
+        "symbol": ctx.symbol,
+        "interval": ctx.settings.interval,
+        "data": {
+            "trading_type": ctx.settings.trading_type,
+            "time_period": ctx.settings.time_period,
+            "start_date": ctx.settings.start_date,
+            "end_date": ctx.settings.end_date or None,
+        },
+        "model": {
+            "framework": "lightgbm",
+            "format": "txt",
+            "path": str(model_path),
+            "feature_count": len(feature_names),
+        },
+        "inference": {
+            "score_name": "proba_up",
+            "feature_names": feature_names,
+        },
+        "strategy": strategy,
+    }
+    if sources:
+        payload["sources"] = {k: v for k, v in sources.items() if v}
+    bundle_path.parent.mkdir(parents=True, exist_ok=True)
+    bundle_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"[export] model bundle saved: {bundle_path}", flush=True)
+
+
 def run_train(symbol: str, config: dict) -> None:
     _validate_required_command_keys(config, "train")
     ctx = _prepare_context(symbol, config, "train")
@@ -668,6 +742,24 @@ def run_train(symbol: str, config: dict) -> None:
             ("metrics-out", f"./models/{ctx.prefix}_metrics.json"),
             ("importance-out", f"./models/{ctx.prefix}_feature_importance.csv"),
         ],
+    )
+    train_cfg = _command_config(config, "train")
+    _export_model_bundle(
+        ctx=ctx,
+        source_command="train",
+        model_path=Path(f"./models/{ctx.prefix}_quant_model.txt"),
+        bundle_path=Path(f"./models/{ctx.prefix}_quant_bundle.json"),
+        strategy={
+            "position_mode": "long_only",
+            "horizon": int(train_cfg.get("horizon")) if train_cfg.get("horizon") is not None else None,
+            "target_threshold": _float_or_none(train_cfg.get("target-threshold")),
+            "buy_threshold": None,
+            "sell_threshold": None,
+        },
+        sources={
+            "metrics": f"./models/{ctx.prefix}_metrics.json",
+            "importance": f"./models/{ctx.prefix}_feature_importance.csv",
+        },
     )
 
 
@@ -713,6 +805,31 @@ def run_auto(symbol: str, config: dict, long_short: bool) -> None:
         script_path="scripts/auto_search_eth.py",
         default_pairs=default_pairs,
         config_command=command,
+    )
+    best_json_path = Path(f"./models/{ctx.prefix}_best{suffix}_config.json")
+    best_model_path = Path(f"./models/{ctx.prefix}_best{suffix}_model.txt")
+    bundle_path = Path(f"./models/{ctx.prefix}_best{suffix}_bundle.json")
+    payload = _load_json_file(best_json_path)
+    best = payload.get("best", {}) if isinstance(payload.get("best"), dict) else {}
+    search_space = payload.get("search_space", {}) if isinstance(payload.get("search_space"), dict) else {}
+    _export_model_bundle(
+        ctx=ctx,
+        source_command=command,
+        model_path=best_model_path,
+        bundle_path=bundle_path,
+        strategy={
+            "position_mode": search_space.get("position_mode") or _command_config(config, command).get("position-mode"),
+            "horizon": best.get("horizon"),
+            "target_threshold": _float_or_none(best.get("target_threshold")),
+            "buy_threshold": _float_or_none(best.get("buy_threshold")),
+            "sell_threshold": _float_or_none(best.get("sell_threshold")),
+            "optimize": payload.get("objective"),
+        },
+        sources={
+            "best_config": str(best_json_path),
+            "results": f"./models/{ctx.prefix}_auto_search{suffix}_results.csv",
+            "equity": f"./models/{ctx.prefix}_best{suffix}_equity.csv",
+        },
     )
 
 
@@ -778,6 +895,76 @@ def run_grid(symbol: str, config: dict) -> None:
     )
 
 
+def run_bundle(symbol: str, config: dict) -> None:
+    mode = str(_get_config_value(config, "bundle", "mode", "best-ls")).strip().lower()
+    ctx = CommandContext(
+        command="bundle",
+        symbol=symbol,
+        prefix=to_prefix(symbol),
+        settings=_resolve_common_settings(config, "bundle"),
+    )
+    if mode in {"best-ls", "best_ls", "auto-ls", "auto_ls"}:
+        suffix = "_ls"
+        best_json_path = Path(f"./models/{ctx.prefix}_best{suffix}_config.json")
+        best_model_path = Path(f"./models/{ctx.prefix}_best{suffix}_model.txt")
+        default_out = Path(f"./models/{ctx.prefix}_best{suffix}_bundle.json")
+        command_name = "auto-ls"
+    elif mode in {"best", "auto"}:
+        suffix = ""
+        best_json_path = Path(f"./models/{ctx.prefix}_best{suffix}_config.json")
+        best_model_path = Path(f"./models/{ctx.prefix}_best{suffix}_model.txt")
+        default_out = Path(f"./models/{ctx.prefix}_best{suffix}_bundle.json")
+        command_name = "auto"
+    elif mode in {"quant", "train"}:
+        train_cfg = _command_config(config, "train")
+        model_path = Path(f"./models/{ctx.prefix}_quant_model.txt")
+        bundle_path = Path(str(_get_config_value(config, "bundle", "out", f"./models/{ctx.prefix}_quant_bundle.json")))
+        _export_model_bundle(
+            ctx=ctx,
+            source_command="train",
+            model_path=model_path,
+            bundle_path=bundle_path,
+            strategy={
+                "position_mode": "long_only",
+                "horizon": int(train_cfg.get("horizon")) if train_cfg.get("horizon") is not None else None,
+                "target_threshold": _float_or_none(train_cfg.get("target-threshold")),
+                "buy_threshold": None,
+                "sell_threshold": None,
+            },
+            sources={
+                "metrics": f"./models/{ctx.prefix}_metrics.json",
+                "importance": f"./models/{ctx.prefix}_feature_importance.csv",
+            },
+        )
+        return
+    else:
+        raise SystemExit("unsupported bundle mode, expected one of: best-ls, best, quant")
+
+    payload = _load_json_file(best_json_path)
+    best = payload.get("best", {}) if isinstance(payload.get("best"), dict) else {}
+    search_space = payload.get("search_space", {}) if isinstance(payload.get("search_space"), dict) else {}
+    bundle_path = Path(str(_get_config_value(config, "bundle", "out", str(default_out))))
+    _export_model_bundle(
+        ctx=ctx,
+        source_command=command_name,
+        model_path=best_model_path,
+        bundle_path=bundle_path,
+        strategy={
+            "position_mode": search_space.get("position_mode") or _command_config(config, command_name).get("position-mode"),
+            "horizon": best.get("horizon"),
+            "target_threshold": _float_or_none(best.get("target_threshold")),
+            "buy_threshold": _float_or_none(best.get("buy_threshold")),
+            "sell_threshold": _float_or_none(best.get("sell_threshold")),
+            "optimize": payload.get("objective"),
+        },
+        sources={
+            "best_config": str(best_json_path),
+            "results": f"./models/{ctx.prefix}_auto_search{suffix}_results.csv",
+            "equity": f"./models/{ctx.prefix}_best{suffix}_equity.csv",
+        },
+    )
+
+
 def run_auto_ls(symbol: str, config: dict) -> None:
     run_auto(symbol, config, long_short=True)
 
@@ -802,6 +989,7 @@ COMMAND_RUNNERS = {
     "backtest": run_backtest_quant,
     "backtest-best": run_backtest_best,
     "grid": run_grid,
+    "bundle": run_bundle,
 }
 
 
