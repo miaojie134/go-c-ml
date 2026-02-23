@@ -85,7 +85,7 @@ def apply_date_filter(df: pd.DataFrame, start_date: str | None, end_date: str | 
     return out
 
 
-def add_features(df: pd.DataFrame) -> pd.DataFrame:
+def add_features(df: pd.DataFrame, enable_mtf: bool = True) -> pd.DataFrame:
     out = df.copy()
     out["ret_1"] = out["close"].pct_change(1)
     out["ret_2"] = out["close"].pct_change(2)
@@ -154,13 +154,19 @@ def add_features(df: pd.DataFrame) -> pd.DataFrame:
         print(f"[WARN] pandas-ta unavailable, continue with core features only: {exc}")
 
     # --- Multi-timeframe features (1h and 4h aggregated into 15m) ---
-    out = _add_multi_timeframe_features(out)
+    if enable_mtf:
+        out = _add_multi_timeframe_features(out)
 
     return out
 
 
 def _add_multi_timeframe_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Resample 15m data to 1h and 4h, compute features, merge back."""
+    """Resample 15m data to 1h and 4h, compute features, merge back.
+
+    CRITICAL: All aggregated values are shifted by 1 period to prevent
+    look-ahead bias. At any 15m bar, the model only sees the PREVIOUS
+    completed 1h/4h candle, never the current one being formed.
+    """
     out = df.copy()
     if "open_time" not in out.columns:
         return out
@@ -188,7 +194,8 @@ def _add_multi_timeframe_features(df: pd.DataFrame) -> pd.DataFrame:
         agg[f"price_ma_ratio_{tf_label}"] = agg["close"] / agg["close"].rolling(20).mean() - 1
 
         merge_cols = [c for c in agg.columns if tf_label in c]
-        agg_merge = agg[merge_cols]
+        # SHIFT by 1 to prevent look-ahead: use only the PREVIOUS completed candle
+        agg_merge = agg[merge_cols].shift(1)
 
         out = out.join(agg_merge, how="left")
         for col in merge_cols:
