@@ -108,19 +108,9 @@ def train_and_evaluate(
         n_jobs=-1,
     )
     try:
-        # Sample weights: emphasize high-magnitude return rows
-        sw = np.abs(ds.y_train.to_numpy())
-        sw_mean = sw.mean()
-        if sw_mean > 0:
-            sw = sw / sw_mean
-            sw = np.clip(sw, 0.2, 5.0)
-        else:
-            sw = np.ones(len(ds.y_train))
-
         model.fit(
             ds.X_train,
             ds.y_train,
-            sample_weight=sw,
             eval_set=[(ds.X_test, ds.y_test)],
             eval_metric="l2",
             callbacks=[early_stopping(stopping_rounds=80), log_evaluation(100)],

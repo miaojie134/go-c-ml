@@ -85,7 +85,7 @@ def apply_date_filter(df: pd.DataFrame, start_date: str | None, end_date: str | 
     return out
 
 
-def add_features(df: pd.DataFrame, enable_mtf: bool = True) -> pd.DataFrame:
+def add_features(df: pd.DataFrame, enable_mtf: bool = False) -> pd.DataFrame:
     out = df.copy()
     out["ret_1"] = out["close"].pct_change(1)
     out["ret_2"] = out["close"].pct_change(2)

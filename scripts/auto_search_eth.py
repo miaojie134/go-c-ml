@@ -290,19 +290,9 @@ def main() -> None:
                 n_jobs=-1,
             )
             try:
-                # Sample weights: emphasize high-magnitude return rows
-                sw_train = np.abs(y_train.to_numpy())
-                sw_mean = sw_train.mean()
-                if sw_mean > 0:
-                    sw_train = sw_train / sw_mean
-                    sw_train = np.clip(sw_train, 0.2, 5.0)
-                else:
-                    sw_train = np.ones(len(y_train))
-
                 model.fit(
                     X_train,
                     y_train,
-                    sample_weight=sw_train,
                     eval_set=[(X_val, y_val)],
                     eval_metric="l2",
                     callbacks=[early_stopping(stopping_rounds=args.early_stop_rounds, verbose=False)],
@@ -327,7 +317,6 @@ def main() -> None:
                 model.fit(
                     X_train,
                     y_train,
-                    sample_weight=sw_train,
                     eval_set=[(X_val, y_val)],
                     eval_metric="l2",
                     callbacks=[early_stopping(stopping_rounds=args.early_stop_rounds, verbose=False)],
@@ -364,7 +353,6 @@ def main() -> None:
                     model2.fit(
                         X_train_p,
                         y_train,
-                        sample_weight=sw_train,
                         eval_set=[(X_val_p, y_val)],
                         eval_metric="l2",
                         callbacks=[early_stopping(stopping_rounds=args.early_stop_rounds, verbose=False)],
