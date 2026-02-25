@@ -91,19 +91,10 @@ def add_features(df: pd.DataFrame, enable_mtf: bool = False) -> pd.DataFrame:
     out["ret_2"] = out["close"].pct_change(2)
     out["ret_4"] = out["close"].pct_change(4)
     out["ret_8"] = out["close"].pct_change(8)
-    out["ret_16"] = out["close"].pct_change(16)
-    out["ret_32"] = out["close"].pct_change(32)
     out["range_hl"] = (out["high"] - out["low"]) / out["close"]
     out["range_oc"] = (out["close"] - out["open"]) / out["open"]
     out["volume_chg_1"] = out["volume"].pct_change(1)
     out["trade_count_chg_1"] = out["number_of_trades"].pct_change(1)
-
-    # --- Microstructure features from existing kline fields ---
-    out["taker_buy_ratio"] = out["taker_buy_base_asset_volume"] / (out["volume"] + 1e-8)
-    out["taker_buy_ratio_chg"] = out["taker_buy_ratio"].pct_change(1)
-    out["avg_trade_size"] = out["volume"] / (out["number_of_trades"] + 1e-8)
-    out["avg_trade_size_chg"] = out["avg_trade_size"].pct_change(1)
-    out["quote_volume_ratio"] = out["quote_asset_volume"] / (out["volume"] + 1e-8)
 
     for window in (5, 10, 20, 48, 96):
         out[f"volatility_{window}"] = out["ret_1"].rolling(window).std()
@@ -117,11 +108,6 @@ def add_features(df: pd.DataFrame, enable_mtf: bool = False) -> pd.DataFrame:
         roll_vol_mean = out["volume"].rolling(window).mean()
         roll_vol_std = out["volume"].rolling(window).std()
         out[f"zscore_volume_{window}"] = (out["volume"] - roll_vol_mean) / (roll_vol_std + 1e-8)
-
-        # Taker buy ratio z-score
-        tbr_mean = out["taker_buy_ratio"].rolling(window).mean()
-        tbr_std = out["taker_buy_ratio"].rolling(window).std()
-        out[f"zscore_taker_buy_{window}"] = (out["taker_buy_ratio"] - tbr_mean) / (tbr_std + 1e-8)
 
     try:
         import pandas_ta as ta

@@ -41,13 +41,11 @@ def build_dataset(
         "future_ret",
         "target",
         "ignore",
-        "tb_label",
     }
-    noisy_cols = {"open", "high", "low", "close", "close_time", "open_time"}
     feature_names = [
         c
         for c in out.columns
-        if c not in reserved_cols and c not in noisy_cols and pd.api.types.is_numeric_dtype(out[c])
+        if c not in reserved_cols and pd.api.types.is_numeric_dtype(out[c])
     ]
     out = out.dropna(subset=feature_names + ["target"]).copy()
     if out.empty:
